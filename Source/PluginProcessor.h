@@ -106,7 +106,7 @@ private:
 
     std::vector<cg::State> undoStack, redoStack;
     std::vector<std::pair<juce::String, cg::State>> favorites;
-    int pendingPass = -1;
+    int pendingPass = -1, passSeen = -1, passTicks = 0;
     bool hostWasPlaying = false;
 
     juce::Synthesiser synth;
@@ -117,7 +117,8 @@ private:
 
     juce::SpinLock captureLock;
     std::vector<CapturedNote> captured;
-    std::array<double, 128> openNotes {};
+    struct OpenNote { double start = -1.0; int pass = 0; };
+    std::array<OpenNote, 128> openNotes {};
 
     juce::SpinLock auditionLock;
     std::vector<int> pendingAuditions;
@@ -137,6 +138,7 @@ private:
     double previewBeat = 0.0, lastPpq = 0.0, lastPpqPlayed = 0.0;
     bool wasHostPlaying = false, wasActive = false, wasPreview = false;
     int pass = 0;
+    std::atomic<int> currentPass { 0 };
     long long lastLoopIndex = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChordGenProcessor)

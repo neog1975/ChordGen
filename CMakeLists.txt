@@ -41,3 +41,15 @@ target_link_libraries(ChordGen
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+option(CHORDGEN_TESTS "Build the capture/engine test program" OFF)
+if(CHORDGEN_TESTS)
+    juce_add_console_app(ChordGenTests PRODUCT_NAME "ChordGenTests")
+    target_sources(ChordGenTests PRIVATE
+        Tests/CaptureTest.cpp
+        Source/Engine.cpp
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp)
+    target_compile_definitions(ChordGenTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JucePlugin_Name="ChordGen" JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(ChordGenTests PRIVATE juce::juce_audio_utils juce::juce_gui_extra juce::juce_recommended_config_flags)
+endif()

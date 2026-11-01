@@ -450,12 +450,17 @@ std::vector<Voicing> voiceProg (const State& st, const Analysis& A)
     for (int i = 0; i < A.nSeg; ++i)
     {
         const auto& c = A.chordAt (i);
+        const auto iv = spell (c, st.complexity, A.minor).iv;
         std::vector<int> pcs;
-        for (auto x : spell (c, st.complexity, A.minor).iv)
+        for (auto x : iv)
             if (! contains (pcs, (c.root + x) % 12)) pcs.push_back ((c.root + x) % 12);
-        if (pcs.size() > 4 && st.bass)
-            pcs.erase (std::remove (pcs.begin(), pcs.end(), c.root), pcs.end());
+        // five-note chords leave out the fifth, never the root: without the root, rich chords
+        // all blur into the same rootless cluster
+        const int fifth = (c.root + triad (c)[2]) % 12;
+        if (pcs.size() > 4 && contains (pcs, fifth) && c.q != Quality::dim && c.q != Quality::aug)
+            pcs.erase (std::remove (pcs.begin(), pcs.end(), fifth), pcs.end());
         std::sort (pcs.begin(), pcs.end(), [&] (int a, int b) { return mod12 (a - c.root) < mod12 (b - c.root); });
+        const bool rich = pcs.size() >= 4;
 
         int melMin = 1000;
         for (const auto& it : A.items[(size_t) i]) melMin = std::min (melMin, it.n.p);
@@ -470,12 +475,37 @@ std::vector<Voicing> voiceProg (const State& st, const Analysis& A)
             for (int lo = base - 2; lo <= base + 11; ++lo)
             {
                 if (lo % 12 != order[0]) continue;
-                std::vector<int> v { lo };
-                for (size_t j = 1; j < order.size(); ++j) { int n = v.back() + 1; while (n % 12 != order[j]) ++n; v.push_back (n); }
-                const double mid = (v.front() + v.back()) / 2.0;
-                double cost = prev.empty() ? std::abs (mid - center) * 0.6 : moveCost (prev, v) + std::abs (mid - center) * 0.15;
-                if (melMin < 1000 && v.back() >= melMin) cost += (v.back() - melMin + 1) * 1.5;
-                if (cost < bestCost) { bestCost = cost; best = v; }
+                std::vector<int> close { lo };
+                for (size_t j = 1; j < order.size(); ++j) { int n = close.back() + 1; while (n % 12 != order[j]) ++n; close.push_back (n); }
+
+                // rich chords may also use a drop-2 voicing (second-highest note an octave down),
+                // which spreads the chord and keeps neighbouring chords from sounding alike
+                std::vector<std::vector<int>> shapes { close };
+                if (rich)
+                {
+                    auto drop2 = close;
+                    drop2[drop2.size() - 2] -= 12;
+                    std::sort (drop2.begin(), drop2.end());
+                    shapes.push_back (drop2);
+                }
+
+                for (const auto& v : shapes)
+                {
+                    const double mid = (v.front() + v.back()) / 2.0;
+                    double cost = prev.empty() ? std::abs (mid - center) * 0.6 : moveCost (prev, v) + std::abs (mid - center) * 0.15;
+                    if (melMin < 1000 && v.back() >= melMin) cost += (v.back() - melMin + 1) * 1.5;
+                    if (rich)
+                    {
+                        if (mod12 (v.front() - c.root) != 0) cost += 6.0; // keep the root at the bottom of rich chords
+                        int seconds = 0;
+                        for (size_t j = 1; j < v.size(); ++j) seconds += (v[j] - v[j - 1]) <= 2;
+                        cost += seconds * 1.5;                            // stacked seconds sound like a smear
+                        cost += std::max (0, 11 - (v.back() - v.front())) * 0.6; // prefer a spread chord
+                    }
+                    if (v.front() < 45) cost += (45 - v.front()) * 2.0;    // avoid muddy low clusters
+                    if (! prev.empty() && v == prev) cost += 4.0;
+                    if (cost < bestCost) { bestCost = cost; best = v; }
+                }
             }
         }
         prev = best;
@@ -783,8 +813,8 @@ std::vector<Event> buildEvents (const State& st, const Analysis& A, bool withPat
     const auto& T = timeSigs()[(size_t) st.ts];
     const auto& S = styleInfo (st.style);
     const double L = T.beats, segB = A.segSteps / 2.0;
-    const auto& chPat = L == 4 ? S.ch4 : S.ch3;
-    const auto& bsPat = L == 4 ? S.bs4 : S.bs3;
+    const auto& chPat = T.beats == 4 ? S.ch4 : S.ch3;
+    const auto& bsPat = T.beats == 4 ? S.bs4 : S.bs3;
     auto swing = [&] (double t) { return S.swing && std::abs (std::fmod (t, 1.0) - 0.5) < 1e-6 ? t + 0.16 : t; };
     std::vector<Event> ev;
 
@@ -990,7 +1020,7 @@ State fromVar (const juce::var& v)
     st.bars = juce::jlimit (1, 16, (int) v.getProperty ("bars", 4));
     st.ts = juce::jlimit (0, 2, (int) v.getProperty ("ts", 0));
     st.rhythm = (double) v.getProperty ("rhythm", 1.0);
-    if (st.rhythm != 2.0 && st.rhythm != 0.5) st.rhythm = 1.0;
+    st.rhythm = st.rhythm > 1.5 ? 2.0 : st.rhythm < 0.75 ? 0.5 : 1.0;
     st.complexity = juce::jlimit (0, 3, (int) v.getProperty ("complexity", 1));
     st.style = (Style) juce::jlimit (0, numStyles - 1, (int) v.getProperty ("style", 0));
     st.borrowed = v.getProperty ("borrowed", true);

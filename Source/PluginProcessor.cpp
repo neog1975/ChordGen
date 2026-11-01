@@ -60,7 +60,7 @@ public:
 
         const auto sr = getSampleRate();
         const auto inc1 = freq / sr, inc2 = freq * 1.004 / sr;
-        const auto a = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * cutoff.load() / (float) sr);
+        const auto a = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * juce::jmax (1600.0f, cutoff.load() * 1.4f) / (float) sr);
 
         for (int i = 0; i < num; ++i)
         {
@@ -72,7 +72,11 @@ public:
                 s = lp * 0.09f;
             }
             else if (kind == 1)
-                s = (float) std::sin (juce::MathConstants<double>::twoPi * phase1) * 0.35f;
+            {
+                // sine plus a little second and third harmonic, so the bass is heard on small speakers
+                const auto w = juce::MathConstants<double>::twoPi * phase1;
+                s = (float) (std::sin (w) + 0.35 * std::sin (2.0 * w) + 0.15 * std::sin (3.0 * w)) * 0.28f;
+            }
             else
                 s = (float) (4.0 * std::abs (phase1 - 0.5) - 1.0) * 0.16f;
 
@@ -108,7 +112,6 @@ ChordGenProcessor::ChordGenProcessor()
         synth.addVoice (new ChordVoice (cutoff, attack));
     synth.addSound (new AnySound());
 
-    openNotes.fill (-1.0);
     captured.reserve (4096);
     activeNotes.reserve (512);
     auditions.reserve (32);
@@ -180,8 +183,9 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         const auto loopIndex = (long long) std::floor (ppq / loopBeats);
         if (! wasHostPlaying || ppq + 1e-6 < lastPpq || loopIndex != lastLoopIndex)
         {
-            ++pass;
-            openNotes.fill (-1.0);
+            if (! wasHostPlaying)
+                openNotes.fill ({});
+            currentPass = ++pass;
         }
         lastLoopIndex = loopIndex;
     }
@@ -198,14 +202,18 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         if (hostPlaying && captureOn.load() && m.isNoteOnOrOff())
         {
             const auto n = m.getNoteNumber();
+            auto& open = openNotes[(size_t) n];
             if (m.isNoteOn())
-                openNotes[(size_t) n] = t;
-            else if (openNotes[(size_t) n] >= 0.0)
+                open = { t, pass };
+            else if (open.start >= 0.0)
             {
+                // a note-off for a note that ends at the loop end arrives after FL jumps back
+                auto length = t - open.start;
+                if (length <= 0.0) length += loopBeats - std::fmod (open.start, loopBeats);
                 const juce::SpinLock::ScopedTryLockType lock (captureLock);
                 if (lock.isLocked() && captured.size() < captured.capacity())
-                    captured.push_back ({ n, openNotes[(size_t) n], t, pass });
-                openNotes[(size_t) n] = -1.0;
+                    captured.push_back ({ n, open.start, open.start + length, open.pass });
+                open = {};
             }
         }
 
@@ -466,6 +474,15 @@ void ChordGenProcessor::timerCallback()
     const bool playing = infoHostPlaying.load();
     if (hostWasPlaying && ! playing)
         commitPending();
+
+    // take the melody shortly after a pass ends, so the next pass already plays matching chords
+    const int cur = currentPass.load();
+    if (cur != passSeen) { passSeen = cur; passTicks = 0; }
+    else if (++passTicks == 3 && playing && pendingPass >= 0 && pendingPass < cur)
+    {
+        commitPending();
+        pendingPass = cur;
+    }
     if (playing && optPreview)
         setOption ("preview", false);
     hostWasPlaying = playing;
@@ -477,6 +494,7 @@ void ChordGenProcessor::onCapturedNotes (const std::vector<CapturedNote>& notes)
     const int total = state.bars * cg::timeSigs()[(size_t) state.ts].steps;
     for (const auto& c : notes)
     {
+        if (c.pass < pendingPass) continue; // late note of a pass that was already taken
         if (c.pass != pendingPass) { commitPending(); pendingPass = c.pass; }
         const int s = ((int) std::lround (c.start * 2) % total + total) % total;
         const int d = juce::jlimit (1, total - s, (int) std::lround ((c.end - c.start) * 2));
