@@ -105,8 +105,29 @@ private:
 };
 } // namespace
 
+// Runs the pitch tracker away from the audio thread.
+class PitchThread : public juce::Thread
+{
+public:
+    explicit PitchThread (ChordGenProcessor& p) : juce::Thread ("ChordGen pitch"), proc (p) {}
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            proc.drainAudio();
+            wait (5);
+        }
+    }
+
+private:
+    ChordGenProcessor& proc;
+};
+
 ChordGenProcessor::ChordGenProcessor()
-    : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
+    : AudioProcessor (isFx ? BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                                              .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                           : BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+      tracker ([this] (const PitchTracker::DetectedNote& n) { onPitchNote (n); })
 {
     for (int i = 0; i < 24; ++i)
         synth.addVoice (new ChordVoice (cutoff, attack));
@@ -118,20 +139,57 @@ ChordGenProcessor::ChordGenProcessor()
     pendingAuditions.reserve (32);
     pattern = std::make_shared<Pattern>();
 
+    audioFifoData.resize ((size_t) audioFifo.getTotalSize());
+    scratch.resize (8192);
+
     cg::loadPreset (state, "A minor pop");
+    if (isFx) { state.source = 3; optThru = false; midiThru = false; }
     commit (true);
     startTimerHz (20);
+
+    if (isFx)
+    {
+        pitchThread = std::make_unique<PitchThread> (*this);
+        pitchThread->startThread();
+    }
 }
 
 ChordGenProcessor::~ChordGenProcessor()
 {
     stopTimer();
+    if (pitchThread != nullptr)
+        pitchThread->stopThread (1000);
+}
+
+void ChordGenProcessor::drainAudio()
+{
+    const double rate = trackerRate.load();
+    if (std::abs (rate - appliedTrackerRate) > 1e-6) { appliedTrackerRate = rate; tracker.setSampleRate (rate); }
+
+    const auto scope = audioFifo.read (audioFifo.getNumReady());
+    if (scope.blockSize1 > 0) tracker.process (audioFifoData.data() + scope.startIndex1, scope.blockSize1);
+    if (scope.blockSize2 > 0) tracker.process (audioFifoData.data() + scope.startIndex2, scope.blockSize2);
+}
+
+void ChordGenProcessor::onPitchNote (const PitchTracker::DetectedNote& n)
+{
+    if (! audioCapture.load() || ! captureOn.load()) return;
+    const auto loop = currentPattern()->loopBeats;
+    auto length = n.end - n.start;
+    if (length <= 0.0) length += loop - std::fmod (n.start, loop); // the note ran past the loop end
+    const juce::SpinLock::ScopedLockType lock (captureLock);
+    if (captured.size() < captured.capacity())
+        captured.push_back ({ n.pitch, n.start, n.start + length, n.pass });
 }
 
 bool ChordGenProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
     const auto out = layouts.getMainOutputChannelSet();
-    return out == juce::AudioChannelSet::stereo() || out == juce::AudioChannelSet::mono();
+    if (out != juce::AudioChannelSet::stereo() && out != juce::AudioChannelSet::mono())
+        return false;
+    if (! isFx) return true;
+    const auto in = layouts.getMainInputChannelSet();
+    return in == out || in == juce::AudioChannelSet::mono();
 }
 
 void ChordGenProcessor::prepareToPlay (double sr, int)
@@ -139,6 +197,10 @@ void ChordGenProcessor::prepareToPlay (double sr, int)
     sampleRate = sr;
     synth.setCurrentPlaybackSampleRate (sr);
     activeNotes.clear();
+    decim = juce::jmax (1, (int) std::lround (sr / 11025.0));
+    trackerRate = sr / decim;
+    acc = 0.0f;
+    accN = 0;
 }
 
 std::shared_ptr<const Pattern> ChordGenProcessor::currentPattern() const
@@ -157,8 +219,10 @@ void ChordGenProcessor::allNotesOff (juce::MidiBuffer& out, int sample)
 void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
-    buffer.clear();
     const int numSamples = buffer.getNumSamples();
+    const int numIn = isFx ? getTotalNumInputChannels() : 0;
+    for (int ch = numIn; ch < buffer.getNumChannels(); ++ch) // the FX passes its input through
+        buffer.clear (ch, 0, numSamples);
 
     double bpm = 120.0, ppq = 0.0;
     bool hostPlaying = false;
@@ -177,19 +241,51 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const auto pat = currentPattern();
     const auto loopBeats = pat->loopBeats > 0.0 ? pat->loopBeats : 16.0;
 
-    // A new capture pass starts when FL starts playing, jumps back (loop) or crosses a loop boundary.
-    if (hostPlaying)
+    // The clock: FL's transport, or our own Preview loop while FL is stopped.
+    const bool preview = ! hostPlaying && previewOn.load();
+    if (preview && ! wasPreview)
+        previewBeat = 0.0;
+    const bool running = hostPlaying || preview;
+    const double clockBeat = hostPlaying ? ppq : previewBeat;
+
+    // A new capture pass starts when the clock starts, jumps back (loop) or crosses a loop boundary.
+    if (running)
     {
-        const auto loopIndex = (long long) std::floor (ppq / loopBeats);
-        if (! wasHostPlaying || ppq + 1e-6 < lastPpq || loopIndex != lastLoopIndex)
+        const auto loopIndex = (long long) std::floor (clockBeat / loopBeats);
+        if (! wasRunning || clockBeat + 1e-6 < lastPpq || loopIndex != lastLoopIndex)
         {
-            if (! wasHostPlaying)
+            if (! wasRunning)
                 openNotes.fill ({});
             currentPass = ++pass;
         }
         lastLoopIndex = loopIndex;
     }
-    lastPpq = ppq;
+    lastPpq = clockBeat;
+
+    // Audio / mic input: mono, decimated to ~11 kHz, handed to the pitch thread with its musical time.
+    if (numIn > 0)
+    {
+        float peak = 0.0f;
+        int n = 0;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float x = 0.0f;
+            for (int ch = 0; ch < numIn; ++ch) x += buffer.getSample (ch, i);
+            x /= (float) numIn;
+            peak = std::max (peak, std::abs (x));
+            acc += x;
+            if (++accN >= decim && n < (int) scratch.size())
+            {
+                scratch[(size_t) n++] = { acc / (float) accN, clockBeat + i * beatsPerSample, pass, running };
+                acc = 0.0f;
+                accN = 0;
+            }
+        }
+        const auto scope = audioFifo.write (std::min (n, audioFifo.getFreeSpace()));
+        for (int k = 0; k < scope.blockSize1; ++k) audioFifoData[(size_t) (scope.startIndex1 + k)] = scratch[(size_t) k];
+        for (int k = 0; k < scope.blockSize2; ++k) audioFifoData[(size_t) (scope.startIndex2 + k)] = scratch[(size_t) (scope.blockSize1 + k)];
+        inputPeak = std::max (peak, inputPeak.load() * 0.85f);
+    }
 
     juce::MidiBuffer out;
 
@@ -225,11 +321,9 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     // Play the chord pattern: in sync with FL when it plays, or on our own clock for Preview.
-    const bool preview = ! hostPlaying && previewOn.load();
     const bool active = (hostPlaying && followHost.load()) || preview;
-
-    if (preview && ! wasPreview)
-        previewBeat = 0.0;
+    int clickAt = -1;
+    bool clickDown = false;
 
     if (! active && wasActive)
         allNotesOff (out, 0);
@@ -290,6 +384,17 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             }
         }
 
+        // metronome while Preview runs, so you can sing or play in time
+        if (preview && metronomeOn.load())
+        {
+            const double b = std::ceil (startBeat - 1e-9);
+            if (b < endBeat)
+            {
+                clickAt = toSample (b);
+                clickDown = std::fmod (b, (double) juce::jmax (1, beatsPerBar.load())) < 1e-6;
+            }
+        }
+
         infoLoopPos = std::fmod (startBeat, loopBeats);
         if (preview)
             previewBeat = endBeat;
@@ -327,11 +432,27 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     else
         synth.allNotesOff (0, false);
 
+    if (clickAt >= 0)
+    {
+        clickLeft = (int) (sampleRate * 0.04);
+        clickPhase = 0.0;
+        clickFreq = clickDown ? 1800.0 : 1200.0;
+    }
+    for (int i = juce::jmax (0, clickAt); i < numSamples && clickLeft > 0; ++i, --clickLeft)
+    {
+        const auto env = (float) clickLeft / (float) (sampleRate * 0.04);
+        const auto v = (float) std::sin (clickPhase) * env * env * 0.25f;
+        clickPhase += juce::MathConstants<double>::twoPi * clickFreq / sampleRate;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch) buffer.addSample (ch, i, v);
+    }
+
     midi.swapWith (out);
 
     wasHostPlaying = hostPlaying;
     wasActive = active;
     wasPreview = preview;
+    wasRunning = running;
+    infoRunning = running;
 
     infoBpm = bpm;
     infoHostPlaying = hostPlaying;
@@ -348,9 +469,11 @@ void ChordGenProcessor::applyPattern()
 
     cutoff = cg::styleInfo (state.style).cutoff;
     attack = state.style == cg::Style::trap ? 0.09f : 0.012f;
+    beatsPerBar = cg::timeSigs()[(size_t) state.ts].beats;
+    audioCapture = state.source >= 3;
 
     const juce::SpinLock::ScopedLockType lock (patternLock);
-    pattern = std::move (p);
+    pattern = (optLive && livePattern != nullptr) ? livePattern : std::move (p);
 }
 
 void ChordGenProcessor::commit (bool resuggest)
@@ -445,6 +568,15 @@ void ChordGenProcessor::setOption (const juce::String& name, bool value)
     else if (name == "internal") { optInternal = value; internalSound = value; }
     else if (name == "thru")     { optThru = value; midiThru = value; }
     else if (name == "capture")  { optCapture = value; captureOn = value; if (! value) pending.clear(); }
+    else if (name == "metronome") { optMetronome = value; metronomeOn = value; }
+    else if (name == "live")
+    {
+        optLive = value;
+        livePattern = nullptr;
+        liveBarKey = -1;
+        liveChord = {};
+        applyPattern();
+    }
     sendChangeMessage();
 }
 
@@ -474,6 +606,22 @@ void ChordGenProcessor::timerCallback()
     const bool playing = infoHostPlaying.load();
     if (hostWasPlaying && ! playing)
         commitPending();
+
+    // Live mode: when a bar ends, the chord that fits it plays in the next bar
+    if (optLive && infoRunning.load())
+    {
+        const int bpb = cg::timeSigs()[(size_t) state.ts].beats;
+        const int bar = (int) std::floor (infoLoopPos.load() / bpb);
+        const int key = currentPass.load() * 1000 + bar;
+        if (key != liveBarKey)
+        {
+            if (liveBarKey >= 0) updateLiveChord (liveBar);
+            liveBarKey = key;
+            liveBar = bar;
+        }
+    }
+    else
+        liveBarKey = -1;
 
     // take the melody shortly after a pass ends, so the next pass already plays matching chords
     const int cur = currentPass.load();
@@ -526,6 +674,38 @@ void ChordGenProcessor::commitPending()
     showToast ("Captured " + juce::String ((int) next.size()) + " notes from FL");
 }
 
+void ChordGenProcessor::updateLiveChord (int bar)
+{
+    const int steps = cg::timeSigs()[(size_t) state.ts].steps;
+    cg::State t = state;
+    t.notes.clear();
+    for (const auto& n : pending)
+        if (n.s >= bar * steps && n.s < (bar + 1) * steps)
+            t.notes.push_back ({ n.p, n.s - bar * steps, std::min (n.d, (bar + 1) * steps - n.s) });
+    if (t.notes.empty()) return; // nothing sung or played: keep the chord
+
+    // keep the key steady: use the lock, or the key of everything heard so far
+    if (! t.keyLocked)
+    {
+        cg::State all = state;
+        all.notes.insert (all.notes.end(), pending.begin(), pending.end());
+        all.locks.clear();
+        t.keyLock = cg::analyse (all, true).key;
+        t.keyLocked = true;
+    }
+    t.bars = 1; t.rhythm = 1.0; t.locks.clear(); t.prog.clear(); t.sugIdx = 0; t.seed = 0; t.playMelody = false;
+    const auto A = cg::analyse (t, true);
+
+    auto p = std::make_shared<Pattern>();
+    p->loopBeats = cg::timeSigs()[(size_t) state.ts].beats;
+    for (const auto& e : cg::buildEvents (t, A, true))
+        if (e.type != 2) p->events.push_back ({ e.t, e.d, e.midi, e.type + 1, e.v });
+    livePattern = p;
+    liveChord = cg::chordName (A.chordAt (0), A, t.complexity);
+    applyPattern();
+    sendChangeMessage();
+}
+
 ChordGenProcessor::HostInfo ChordGenProcessor::getHostInfo() const
 {
     HostInfo h;
@@ -555,6 +735,8 @@ void ChordGenProcessor::getStateInformation (juce::MemoryBlock& dest)
     root->setProperty ("internal", optInternal);
     root->setProperty ("thru", optThru);
     root->setProperty ("accent", accent);
+    root->setProperty ("live", optLive);
+    root->setProperty ("metronome", optMetronome);
 
     juce::ValueTree vt ("ChordGen");
     vt.setProperty ("json", juce::JSON::toString (juce::var (root), true), nullptr);
@@ -582,6 +764,8 @@ void ChordGenProcessor::setStateInformation (const void* data, int size)
     setOption ("internal", root.getProperty ("internal", true));
     setOption ("thru", root.getProperty ("thru", true));
     accent = juce::jlimit (0, 3, (int) root.getProperty ("accent", 0));
+    setOption ("metronome", root.getProperty ("metronome", true));
+    setOption ("live", root.getProperty ("live", false));
     undoStack.clear();
     redoStack.clear();
     commit (false);

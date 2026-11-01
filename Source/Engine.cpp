@@ -1039,7 +1039,7 @@ State fromVar (const juce::var& v)
     st.sugIdx = (int) v.getProperty ("sugIdx", 0);
     st.seed = (int) v.getProperty ("seed", 0);
     st.selected = (int) v.getProperty ("selected", 0);
-    st.source = juce::jlimit (0, 2, (int) v.getProperty ("source", 0));
+    st.source = juce::jlimit (0, 4, (int) v.getProperty ("source", 0));
     st.preset = v.getProperty ("preset", "").toString();
     return st;
 }

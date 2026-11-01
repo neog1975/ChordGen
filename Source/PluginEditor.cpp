@@ -652,10 +652,22 @@ ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
     tabHost.setTooltip ("Melody from the FL piano roll (Capture)");
     tabDraw.setTooltip ("Draw the melody in the roll below");
     tabMidi.setTooltip ("Load a melody from a .mid file");
-    tabAudio.setEnabled (false);
-    tabMic.setEnabled (false);
-    tabAudio.setTooltip ("Coming in Phase 2: melody from an audio track");
-    tabMic.setTooltip ("Coming in Phase 2: melody from a microphone");
+    tabAudio.setTooltip ("Melody from an audio track: sing, guitar or synth lead, one note at a time");
+    tabMic.setTooltip ("Melody from a microphone, live");
+    if (ChordGenProcessor::isFx)
+    {
+        tabHost.setEnabled (false);
+        tabHost.setTooltip ("Use ChordGen (instrument) in the Channel Rack for piano-roll melodies");
+        tabAudio.onClick = [this] { proc.state.source = 3; proc.commit (false); };
+        tabMic.onClick = [this] { proc.state.source = 4; proc.commit (false); };
+    }
+    else
+    {
+        auto explainFx = [this] { toast.setBounds ((getWidth() - 560) / 2, getHeight() - 64, 560, 40);
+                                  toast.show ("Audio and Mic: load ChordGen FX on the mixer insert of your vocal or mic track."); };
+        tabAudio.onClick = explainFx;
+        tabMic.onClick = explainFx;
+    }
     tabHost.onClick = [this] { proc.state.source = 0; refresh(); };
     tabDraw.onClick = [this] { proc.state.source = 1; refresh(); };
     tabMidi.onClick = [this] { chooseImport(); };
@@ -840,11 +852,16 @@ ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
     followToggle.onClick = [this] { proc.setOption ("follow", followToggle.getToggleState()); };
     internalToggle.onClick = [this] { proc.setOption ("internal", internalToggle.getToggleState()); };
     thruToggle.onClick = [this] { proc.setOption ("thru", thruToggle.getToggleState()); };
+    liveToggle.onClick = [this] { proc.setOption ("live", liveToggle.getToggleState()); };
+    metronomeToggle.onClick = [this] { proc.setOption ("metronome", metronomeToggle.getToggleState()); };
+    liveToggle.setTooltip ("Jam: each bar, ChordGen plays the chord that fits the bar you just played");
+    metronomeToggle.setTooltip ("Click on every beat while Preview runs");
     followToggle.setTooltip ("Play the chords while FL plays");
     internalToggle.setTooltip ("Turn off to send only MIDI to another synth");
     thruToggle.setTooltip ("Pass the incoming melody through to the output");
     borrowToggle.setTooltip ("Allow chords from outside the key, like the major V in minor");
-    for (auto* t : { &bassToggle, &borrowToggle, &melodyToggle, &rhythmMidiToggle, &followToggle, &internalToggle, &thruToggle })
+    for (auto* t : { &bassToggle, &borrowToggle, &melodyToggle, &rhythmMidiToggle, &followToggle, &internalToggle, &thruToggle,
+                     &liveToggle, &metronomeToggle })
         addAndMakeVisible (t);
 
     for (auto* b : { &previewButton, &saveMidiButton })
@@ -913,6 +930,8 @@ void ChordGenEditor::refresh()
     tabHost.setToggleState (st.source == 0, juce::dontSendNotification);
     tabDraw.setToggleState (st.source == 1, juce::dontSendNotification);
     tabMidi.setToggleState (st.source == 2, juce::dontSendNotification);
+    tabAudio.setToggleState (st.source == 3, juce::dontSendNotification);
+    tabMic.setToggleState (st.source == 4, juce::dontSendNotification);
     captureButton.setButtonText (proc.optCapture ? "Capture on" : "Capture off");
     captureButton.setToggleState (proc.optCapture, juce::dontSendNotification);
     accentDots.selected = proc.accent;
@@ -946,6 +965,8 @@ void ChordGenEditor::refresh()
     followToggle.setToggleState (proc.optFollow, juce::dontSendNotification);
     internalToggle.setToggleState (proc.optInternal, juce::dontSendNotification);
     thruToggle.setToggleState (proc.optThru, juce::dontSendNotification);
+    liveToggle.setToggleState (proc.optLive, juce::dontSendNotification);
+    metronomeToggle.setToggleState (proc.optMetronome, juce::dontSendNotification);
     previewButton.setButtonText (proc.optPreview ? "Stop" : "Preview");
     previewButton.setToggleState (proc.optPreview, juce::dontSendNotification);
 
@@ -1003,6 +1024,7 @@ void ChordGenEditor::updatePlaying()
     const int bpm = (int) std::lround (info.bpm);
     juce::String s = info.hostPlaying ? (proc.optCapture ? "Listening" : "Playing") : proc.optPreview ? "Preview" : "Ready";
     s += " " + dot + " " + juce::String (bpm) + " BPM";
+    if (proc.optLive && proc.liveChord.isNotEmpty()) s += " " + dot + " Live " + proc.liveChord;
     if (s != statusText || info.active != statusLive)
     {
         statusText = s;
@@ -1014,6 +1036,17 @@ void ChordGenEditor::updatePlaying()
 void ChordGenEditor::timerCallback()
 {
     updatePlaying();
+
+    if (ChordGenProcessor::isFx)
+    {
+        const float level = proc.inputLevel(), pitch = proc.livePitch();
+        if (std::abs (level - shownLevel) > 0.01f || std::abs (pitch - shownPitch) > 0.02f)
+        {
+            shownLevel = level;
+            shownPitch = pitch;
+            repaint (pitchArea);
+        }
+    }
 
     // Development aid: CHORDGEN_SNAPSHOT=/path/shot.png saves a picture of the editor once.
     static bool snapshotTaken = false;
@@ -1223,7 +1256,7 @@ void ChordGenEditor::resized()
         rowB.removeFromRight (16);
         auto t1 = rowB.removeFromTop (22), t2 = rowB;
         for (auto* t : { &bassToggle, &borrowToggle, &melodyToggle, &rhythmMidiToggle }) t->setBounds (t1.removeFromLeft (172));
-        for (auto* t : { &followToggle, &internalToggle, &thruToggle }) t->setBounds (t2.removeFromLeft (172));
+        for (auto* t : { &followToggle, &internalToggle, &thruToggle, &liveToggle, &metronomeToggle }) t->setBounds (t2.removeFromLeft (t == &liveToggle ? 196 : 172));
     }
 
     if (toast.isVisible())
@@ -1286,11 +1319,46 @@ void ChordGenEditor::paint (juce::Graphics& g)
         g.setColour (theme::line);
         g.drawRoundedRectangle (box.reduced (0.5f), 16.0f, 1.0f);
         auto rp = rollPanelArea.reduced (18, 14);
-        const juce::String src = st.source == 0 ? "FL piano roll" : st.source == 2 ? "MIDI file" : "Drawn";
-        theme::label (g, "Melody " + dot + " " + src, rp.removeFromTop (28));
+        const juce::StringArray sources { "FL piano roll", "Drawn", "MIDI file", "Audio track", "Microphone" };
+        const auto title = "Melody " + dot + " " + sources[st.source];
+        auto titleRow = rp.removeFromTop (28);
+        theme::label (g, title, titleRow);
+
+        if (ChordGenProcessor::isFx)
+        {
+            // live input: level meter and the detected note with its deviation in cents
+            pitchArea = titleRow.withX (titleRow.getX() + (int) theme::textWidth (theme::mono (11.0f).withExtraKerningFactor (0.14f), title.toUpperCase()) + 18)
+                                .withRight (presetBox.getX() - 10);
+            auto pa = pitchArea;
+            const auto meter = pa.removeFromLeft (46).withSizeKeepingCentre (46, 6).toFloat();
+            g.setColour (theme::line);
+            g.fillRoundedRectangle (meter, 3.0f);
+            g.setColour (shownLevel > 0.9f ? theme::clash : theme::ok);
+            g.fillRoundedRectangle (meter.withWidth (meter.getWidth() * juce::jlimit (0.0f, 1.0f, std::sqrt (shownLevel))), 3.0f);
+            pa.removeFromLeft (10);
+            if (shownPitch > 0.0f)
+            {
+                const int note = (int) std::lround (shownPitch);
+                const int cents = (int) std::lround ((shownPitch - (float) note) * 100.0f);
+                g.setColour (a);
+                g.setFont (theme::mono (13.0f));
+                g.drawText (juce::String::fromUTF8 ("\xe2\x99\xaa ") + noteWithOctave (note, proc.analysis.flats) + "  "
+                                + (cents >= 0 ? "+" : "") + juce::String (cents) + juce::String::fromUTF8 ("\xc2\xa2"),
+                            pa, juce::Justification::centredLeft, true);
+            }
+            else
+            {
+                g.setColour (theme::dim);
+                g.setFont (theme::mono (12.0f));
+                g.drawText ("no pitch", pa, juce::Justification::centredLeft, true);
+            }
+        }
+
         g.setColour (theme::dim);
         g.setFont (theme::ui (12.0f));
-        g.drawText ("Click to add a note, drag right to lengthen, click a note to delete. Click a chord name to select it. Drop a .mid file here. Red notes clash.",
+        g.drawText (ChordGenProcessor::isFx
+                        ? "Sing or play one note at a time. Press Play in FL (or Preview with the metronome); after one pass ChordGen suggests chords."
+                        : "Click to add a note, drag right to lengthen, click a note to delete. Click a chord name to select it. Drop a .mid file here. Red notes clash.",
                     rp.removeFromBottom (18), juce::Justification::centredLeft, true);
     }
 

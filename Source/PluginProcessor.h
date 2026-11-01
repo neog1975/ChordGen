@@ -4,6 +4,11 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_events/juce_events.h>
 #include "Engine.h"
+#include "Pitch.h"
+
+#ifndef CHORDGEN_FX
+ #define CHORDGEN_FX 0 // 1 = the mixer-insert variant that listens to audio
+#endif
 
 // One note of the chord pattern. Times are in beats (quarter notes) from the start of the loop.
 // Channel 1 = chords, 2 = bass, 3 = melody.
@@ -84,7 +89,13 @@ public:
     int accent = 0;
 
     // options that live outside undo
-    bool optCapture = true, optFollow = true, optInternal = true, optThru = true, optPreview = false;
+    bool optCapture = true, optFollow = true, optInternal = true, optThru = true, optPreview = false,
+         optLive = false, optMetronome = true;
+    static constexpr bool isFx = CHORDGEN_FX != 0;
+
+    float inputLevel() const { return inputPeak.load(); }
+    float livePitch() const { return tracker.pitch.load(); }
+    juce::String liveChord; // Live mode: the chord playing now
     void setOption (const juce::String& name, bool value);
     void auditionNote (int note);
 
@@ -96,7 +107,11 @@ public:
     HostInfo getHostInfo() const;
 
 private:
+    friend class PitchThread;
     void timerCallback() override;
+    void drainAudio();
+    void onPitchNote (const PitchTracker::DetectedNote&);
+    void updateLiveChord (int bar);
     void onCapturedNotes (const std::vector<CapturedNote>&);
     void commitPending();
     void applyPattern();
@@ -105,6 +120,26 @@ private:
     void allNotesOff (juce::MidiBuffer& out, int sample);
 
     std::vector<cg::State> undoStack, redoStack;
+
+    // audio / mic input
+    PitchTracker tracker;
+    std::unique_ptr<juce::Thread> pitchThread;
+    juce::AbstractFifo audioFifo { 1 << 16 };
+    std::vector<AudioFrame> audioFifoData, scratch;
+    std::atomic<double> trackerRate { 11025.0 };
+    double appliedTrackerRate = 0.0;
+    int decim = 4, accN = 0;
+    float acc = 0.0f;
+    std::atomic<float> inputPeak { 0.0f };
+    std::atomic<bool> audioCapture { false }, metronomeOn { true };
+    std::atomic<int> beatsPerBar { 4 };
+    double clickPhase = 0.0, clickFreq = 1200.0;
+    int clickLeft = 0;
+
+    // Live mode
+    std::shared_ptr<const Pattern> livePattern;
+    int liveBarKey = -1, liveBar = 0;
+    std::atomic<bool> infoRunning { false };
     std::vector<std::pair<juce::String, cg::State>> favorites;
     int pendingPass = -1, passSeen = -1, passTicks = 0;
     bool hostWasPlaying = false;
@@ -136,7 +171,7 @@ private:
 
     double sampleRate = 44100.0;
     double previewBeat = 0.0, lastPpq = 0.0, lastPpqPlayed = 0.0;
-    bool wasHostPlaying = false, wasActive = false, wasPreview = false;
+    bool wasHostPlaying = false, wasActive = false, wasPreview = false, wasRunning = false;
     int pass = 0;
     std::atomic<int> currentPass { 0 };
     long long lastLoopIndex = -1;

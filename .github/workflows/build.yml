@@ -29,6 +29,11 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: ChordGen-FX-Windows-VST3
+          path: build/ChordGenFX_artefacts/Release/VST3/ChordGen FX.vst3
+
+      - uses: actions/upload-artifact@v4
+        with:
           name: ChordGen-Windows-Standalone
           path: build/ChordGen_artefacts/Release/Standalone/ChordGen.exe
 
@@ -48,6 +53,14 @@ jobs:
 
       - name: Zip
         run: cd build/ChordGen_artefacts/Release/VST3 && ditto -c -k --keepParent ChordGen.vst3 ChordGen-mac-vst3.zip
+
+      - name: Zip FX
+        run: cd "build/ChordGenFX_artefacts/Release/VST3" && ditto -c -k --keepParent "ChordGen FX.vst3" ChordGen-FX-mac-vst3.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChordGen-FX-macOS-VST3
+          path: build/ChordGenFX_artefacts/Release/VST3/ChordGen-FX-mac-vst3.zip
 
       - uses: actions/upload-artifact@v4
         with:

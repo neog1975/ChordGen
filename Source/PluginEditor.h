@@ -183,7 +183,8 @@ private:
     juce::TextButton octDown { "-" }, octUp { "+" };
     juce::ToggleButton bassToggle { "Bass line" }, borrowToggle { "Borrowed chords" }, melodyToggle { "Melody in preview" },
                        rhythmMidiToggle { "Style rhythm in MIDI" }, followToggle { "Play with FL" },
-                       internalToggle { "Built-in sound" }, thruToggle { "Melody thru" };
+                       internalToggle { "Built-in sound" }, thruToggle { "Melody thru" },
+                       liveToggle { "Live mode (1 bar delay)" }, metronomeToggle { "Metronome in preview" };
     juce::TextButton previewButton { "Preview" }, saveMidiButton { "Save MIDI..." };
     MidiDragButton dragButton;
     Toast toast;
@@ -195,6 +196,8 @@ private:
     bool statusLive = false;
 
     // painted layout regions
+    juce::Rectangle<int> pitchArea;
+    float shownLevel = 0.0f, shownPitch = 0.0f;
     juce::Rectangle<int> headerArea, rollPanelArea, progHeadArea, explainArea, kbInfoArea, controlsArea,
                          complexityLabel, styleLabel, voicingLabel, optionsLabel, octValueArea;
 
