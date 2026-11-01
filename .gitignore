@@ -1,5 +1,15 @@
+# build output
 build/
-JUCE/
-*.log
-.DS_Store
+Builds/
 dist/
+*.vst3
+*.component
+
+# JUCE is cloned next to the sources (see README)
+JUCE/
+
+# Xcode / macOS
+xcuserdata/
+.DS_Store
+
+*.log
