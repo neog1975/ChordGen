@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  JUCE_VERSION: 8.0.8
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get JUCE
+        run: git clone --depth 1 --branch ${{ env.JUCE_VERSION }} https://github.com/juce-framework/JUCE.git JUCE
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCHORDGEN_COPY_PLUGIN=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChordGen-Windows-VST3
+          path: build/ChordGen_artefacts/Release/VST3/ChordGen.vst3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChordGen-Windows-Standalone
+          path: build/ChordGen_artefacts/Release/Standalone/ChordGen.exe
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get JUCE
+        run: git clone --depth 1 --branch ${{ env.JUCE_VERSION }} https://github.com/juce-framework/JUCE.git JUCE
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCHORDGEN_COPY_PLUGIN=OFF "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Zip
+        run: cd build/ChordGen_artefacts/Release/VST3 && ditto -c -k --keepParent ChordGen.vst3 ChordGen-mac-vst3.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChordGen-macOS-VST3
+          path: build/ChordGen_artefacts/Release/VST3/ChordGen-mac-vst3.zip

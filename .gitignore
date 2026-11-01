@@ -1,0 +1,4 @@
+build/
+JUCE/
+*.log
+.DS_Store
