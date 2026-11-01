@@ -8,6 +8,8 @@
 
 Formats: **VST3** and **Standalone** for Windows and macOS (Intel and Apple Silicon). Built for FL Studio; works in other VST3 hosts.
 
+**⬇️ Download:** get the ready-to-install plugins for Windows and macOS from the [latest release](https://github.com/neog1975/ChordGen/releases/latest) (install steps are on that page).
+
 > Status: early version (v0.3). Feedback, bug reports and pull requests are very welcome.
 
 ## Two plugins
