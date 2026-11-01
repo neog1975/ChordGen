@@ -66,12 +66,12 @@ int main()
     p.prepareToPlay (44100.0, 512);
     report (p, "start (example melody)");
 
-    // A 4-bar melody in G major over G - Em - C - D
+    // A 4-bar melody in G major with 16ths, dotted notes and a low second voice
     const std::vector<MelodyNote> mel {
-        { 67, 0, 1 }, { 71, 1, 1 }, { 74, 2, 2 },
-        { 71, 4, 1 }, { 67, 5, 1 }, { 64, 6, 2 },
-        { 72, 8, 1 }, { 76, 9, 1 }, { 79, 10, 2 },
-        { 78, 12, 1 }, { 74, 13, 1 }, { 69, 14, 2 },
+        { 67, 0, 0.25 }, { 67, 0.5, 0.25 }, { 71, 0.75, 0.25 }, { 74, 1, 0.75 }, { 74, 1.75, 0.25 }, { 72, 2.5, 1.5 },
+        { 71, 4, 0.25 }, { 67, 4.25, 0.25 }, { 64, 4.5, 0.5 }, { 62, 5.25, 0.25 }, { 64, 6, 2 },
+        { 72, 8, 0.25 }, { 76, 8.75, 0.25 }, { 79, 9, 1.5 }, { 48, 10.5, 0.125 }, { 48, 11, 0.125 },
+        { 78, 12, 0.5 }, { 74, 12.75, 0.25 }, { 69, 13, 3 }, { 50, 13.5, 0.125 },
     };
     const double loop = 16.0;
 
@@ -92,9 +92,42 @@ int main()
     pump (200);
     report (p, "after stop");
 
-    std::cout << "captured:";
-    for (const auto& n : p.state.notes) std::cout << " " << n.p << "@" << n.s << "/" << n.d;
-    std::cout << "\n";
+    // every note must come back at exactly the position and length FL sent
+    int exact = 0;
+    for (const auto& m : mel)
+    {
+        const cg::Note want { m.pitch, (int) std::lround (m.start * cg::stepsPerBeat), (int) std::lround (m.length * cg::stepsPerBeat) };
+        const bool ok = std::find (p.state.notes.begin(), p.state.notes.end(), want) != p.state.notes.end();
+        exact += ok;
+        if (! ok) std::cout << "  timing differs: " << m.pitch << " @" << m.start << " len " << m.length << "\n";
+    }
+    for (const auto& n : p.state.notes) if (n.p == 69) std::cout << "  got 69 @" << n.s << " len " << n.d << "\n";
+    std::cout << "capture timing: " << exact << "/" << mel.size() << " exact, " << p.state.notes.size() << " notes\n";
+
+    // the same melody as a .mid file through Import
+    {
+        juce::MidiMessageSequence seq;
+        for (const auto& m : mel)
+        {
+            seq.addEvent (juce::MidiMessage::noteOn (1, m.pitch, 0.8f), m.start * 960);
+            seq.addEvent (juce::MidiMessage::noteOff (1, m.pitch), (m.start + m.length) * 960);
+        }
+        seq.sort();
+        juce::MidiFile mf;
+        mf.setTicksPerQuarterNote (960);
+        mf.addTrack (seq);
+        const auto f = juce::File::createTempFile (".mid");
+        { juce::FileOutputStream out (f); mf.writeTo (out); }
+        const auto r = cg::importMidi (f);
+        f.deleteFile();
+        int ok = 0;
+        for (const auto& m : mel)
+        {
+            const cg::Note want { m.pitch, (int) std::lround (m.start * cg::stepsPerBeat), (int) std::lround (m.length * cg::stepsPerBeat) };
+            ok += std::find (r.notes.begin(), r.notes.end(), want) != r.notes.end();
+        }
+        std::cout << "import timing: " << ok << "/" << mel.size() << " exact" << (r.error.isNotEmpty() ? " error " + r.error : juce::String()) << "\n";
+    }
 
     for (int cx = 0; cx < 4; ++cx)
     {

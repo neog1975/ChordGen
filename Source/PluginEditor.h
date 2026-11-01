@@ -62,7 +62,7 @@ public:
     bool playing = false;
 
 private:
-    static constexpr int head = 24;
+    static constexpr int head = 24, snap = cg::stepsPerBeat / 4; // editing grid: 16th notes
     ChordGenEditor& editor;
     int lo = 57, hi = 84;
     int dragIndex = -1;

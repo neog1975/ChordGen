@@ -12,7 +12,7 @@ namespace cg
 {
 struct Note
 {
-    int p = 60, s = 0, d = 1; // pitch, start and length in eighth-note steps
+    int p = 60, s = 0, d = 1; // pitch, start and length in steps of 1/stepsPerBeat beat
     bool operator== (const Note& o) const { return p == o.p && s == o.s && d == o.d; }
 };
 
@@ -23,7 +23,11 @@ constexpr int numStyles = 4;
 struct ModeInfo { const char* name; std::array<int, 7> iv; bool minor; int off; };
 const std::vector<ModeInfo>& modes(); // 0 major, 1 minor, 2 harmonic minor, 3 Dorian, 4 Phrygian, 5 Mixolydian, 6 Lydian
 
-struct TimeSig { const char* name; int steps, beats, num, den; std::array<double, 8> accent; };
+// Fine enough for 16ths, 32nds and triplets, so notes keep the exact timing FL sends.
+constexpr int stepsPerBeat = 24;
+
+struct TimeSig { const char* name; int steps, beats, num, den; std::array<double, 8> accent; }; // steps per bar; accent per eighth
+double accentAt (const TimeSig&, int step);
 const std::vector<TimeSig>& timeSigs(); // 0 4/4, 1 3/4, 2 6/8
 
 struct StyleInfo

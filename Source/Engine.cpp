@@ -10,6 +10,10 @@ namespace
 {
 int mod12 (int n) { return ((n % 12) + 12) % 12; }
 
+// Weights tuned on ~2300 trance MIDI files (chord packs and full arrangements, see Tests/ChordEval):
+// the notes of the bar count more than typical-progression habits, and repeating a chord is normal.
+constexpr double fitWeight = 4.0, transWeight = 0.6, repeatScale = 0.2;
+
 const juce::String flatSign  = juce::String::fromUTF8 ("\xe2\x99\xad");
 const juce::String sharpSign = juce::String::fromUTF8 ("\xe2\x99\xaf");
 const juce::String degree    = juce::String::fromUTF8 ("\xc2\xb0");
@@ -92,7 +96,7 @@ std::vector<Item> itemsIn (const State& st, int a, int b)
         if (n.s >= b || n.s + n.d <= a) continue;
         const int ov = std::min (b, n.s + n.d) - std::max (a, n.s);
         const bool inside = n.s >= a;
-        const double acc = inside ? T.accent[(size_t) (n.s % T.steps)] * (n.s == a ? 1.15 : 1.0) : 0.7;
+        const double acc = inside ? accentAt (T, n.s) * (n.s == a ? 1.15 : 1.0) : 0.7;
         out.push_back ({ n, ov * acc, acc, inside });
     }
     return out;
@@ -103,7 +107,7 @@ std::array<double, 12> pcWeights (const State& st)
     const auto& T = timeSigs()[(size_t) st.ts];
     std::array<double, 12> w {};
     for (const auto& n : st.notes)
-        w[(size_t) (n.p % 12)] += n.d * T.accent[(size_t) (n.s % T.steps)];
+        w[(size_t) (n.p % 12)] += n.d * accentAt (T, n.s);
 
     if (! st.notes.empty())
     {
@@ -247,7 +251,33 @@ std::vector<KeyCandidate> detectKeys (const State& st, const std::array<double, 
     std::stable_sort (res.begin(), res.end(), [] (const Raw& a, const Raw& b) { return a.rank > b.rank; });
 
     std::vector<KeyCandidate> out;
-    for (const auto& c : res) out.push_back ({ { c.tonic, refineMode (c.tonic, c.minor, w) }, c.r });
+    // Church modes only when the music really sits on their tonic (first and last bar);
+    // otherwise the same notes are named as the plain major or minor key they belong to.
+    const std::vector<int> tonicMajor { 0, 4, 7 }, tonicMinor { 0, 3, 7 };
+    auto sitsOn = [&] (int tonic, bool minor)
+    {
+        const auto& tri = minor ? tonicMinor : tonicMajor;
+        return ! bars.empty() && triFit (tonic, tri, bars.front()) > 0.5 && triFit (tonic, tri, bars.back()) > 0.5;
+    };
+    for (const auto& c : res)
+    {
+        Key k { c.tonic, refineMode (c.tonic, c.minor, w) };
+        if (k.mode >= 3 && ! sitsOn (k.tonic, modes()[(size_t) k.mode].minor))
+        {
+            // same notes as: Dorian = major a tone lower, Phrygian = a major third lower,
+            // Mixolydian = a fourth higher, Lydian = a fourth lower
+            const int parent = mod12 (k.tonic + modes()[(size_t) k.mode].off);
+            const Key major { parent, 0 }, minor { mod12 (parent + 9), 1 };
+            int rMaj = 1000, rMin = 1000;
+            for (size_t i = 0; i < res.size(); ++i)
+            {
+                if (res[i].tonic == major.tonic && ! res[i].minor) rMaj = std::min (rMaj, (int) i);
+                if (res[i].tonic == minor.tonic && res[i].minor) rMin = std::min (rMin, (int) i);
+            }
+            k = rMin < rMaj ? minor : major;
+        }
+        out.push_back ({ k, c.r });
+    }
     return out;
 }
 
@@ -274,7 +304,7 @@ Fit fit (const Chord& c, const std::vector<Item>& items, int cx, const Analysis&
         // a note outside the scale is strong evidence for the chord that contains it (G# -> E in A minor)
         const bool chrom = ! A.scale[(size_t) (it.n.p % 12)];
         double cr;
-        if (contains (ts.tri, rel)) { cr = chrom ? 2.5 : (rel == 0 || rel == ts.tri[1]) ? 1.0 : 0.9; good += it.w; }
+        if (contains (ts.tri, rel)) { cr = chrom ? 2.5 : 1.0; good += it.w; } // root, third and fifth alike: melodies sit on all of them
         else if (contains (ts.ext, rel)) { cr = chrom ? 1.2 : 0.55; good += it.w; }
         else if (chrom) cr = -2.5;
         else if (rel == c.sev) cr = 0.15;
@@ -293,7 +323,7 @@ Fit fit (const Chord& c, const std::vector<Item>& items, int cx, const Analysis&
 
 double trans (const Chord& a, const Chord& b, const StyleInfo& st, bool minor)
 {
-    if (a.code() == b.code()) return st.repeat;
+    if (a.code() == b.code()) return st.repeat * repeatScale;
     double s = 0;
     switch (mod12 (b.root - a.root))
     {
@@ -377,8 +407,8 @@ std::vector<std::vector<int>> search (const State& st, const Analysis& A)
             for (const int j : opts)
             {
                 const auto& c = chords[(size_t) j];
-                double s = base + 2.2 * A.fits[(size_t) i][(size_t) j].score + prior (c, S, st.style, A.minor);
-                s += p >= 0 ? trans (chords[(size_t) arena[(size_t) p].c], c, S, A.minor) : (c.semi == 0 ? 0.5 : 0.0);
+                double s = base + fitWeight * A.fits[(size_t) i][(size_t) j].score + prior (c, S, st.style, A.minor);
+                s += p >= 0 ? transWeight * trans (chords[(size_t) arena[(size_t) p].c], c, S, A.minor) : (c.semi == 0 ? 0.5 : 0.0);
                 if (st.seed != 0) s += (hash3 (st.seed, i, j) - 0.5) * 0.9;
                 cand.push_back ({ j, p, s });
             }
@@ -615,11 +645,18 @@ const std::vector<ModeInfo>& modes()
 const std::vector<TimeSig>& timeSigs()
 {
     static const std::vector<TimeSig> t {
-        { "4/4", 8, 4, 4, 4, { 1.5, .8, 1.05, .8, 1.25, .8, 1.05, .8 } },
-        { "3/4", 6, 3, 3, 4, { 1.5, .8, 1.1, .8, 1.1, .8, 0, 0 } },
-        { "6/8", 6, 3, 6, 8, { 1.5, .85, .85, 1.25, .85, .85, 0, 0 } },
+        { "4/4", 4 * stepsPerBeat, 4, 4, 4, { 1.5, .8, 1.05, .8, 1.25, .8, 1.05, .8 } },
+        { "3/4", 3 * stepsPerBeat, 3, 3, 4, { 1.5, .8, 1.1, .8, 1.1, .8, 0, 0 } },
+        { "6/8", 3 * stepsPerBeat, 3, 6, 8, { 1.5, .85, .85, 1.25, .85, .85, 0, 0 } },
     };
     return t;
+}
+
+double accentAt (const TimeSig& T, int step)
+{
+    constexpr int perEighth = stepsPerBeat / 2;
+    const int inBar = ((step % T.steps) + T.steps) % T.steps;
+    return inBar % perEighth == 0 ? T.accent[(size_t) (inBar / perEighth)] : 0.7; // 16ths and finer: weak
 }
 
 const StyleInfo& styleInfo (Style s)
@@ -750,9 +787,9 @@ std::vector<int> alternatives (const State& st, const Analysis& A, int i)
     {
         const auto& c = A.chords[j];
         if (c.code() == cur.code()) continue;
-        double s = 2.2 * A.fits[(size_t) i][j].score + prior (c, S, st.style, A.minor);
-        if (i > 0) s += trans (A.chordAt (i - 1), c, S, A.minor);
-        if (i + 1 < A.nSeg) s += trans (c, A.chordAt (i + 1), S, A.minor);
+        double s = fitWeight * A.fits[(size_t) i][j].score + prior (c, S, st.style, A.minor);
+        if (i > 0) s += transWeight * trans (A.chordAt (i - 1), c, S, A.minor);
+        if (i + 1 < A.nSeg) s += transWeight * trans (c, A.chordAt (i + 1), S, A.minor);
         scored.push_back ({ s, (int) j });
     }
     std::stable_sort (scored.begin(), scored.end(), [] (auto& a, auto& b) { return a.first > b.first; });
@@ -770,7 +807,7 @@ std::vector<Note> clashes (const State& st, const Analysis& A, const Chord& c, i
         const int rel = mod12 (it.n.p - c.root);
         if (contains (ts.tri, rel) || contains (ts.ext, rel)) continue;
         const bool halfStepAbove = std::any_of (ts.tri.begin(), ts.tri.end(), [rel] (int x) { return (x + 1) % 12 == rel; });
-        if (it.n.d >= 2 || it.acc >= 1.2 || halfStepAbove) out.push_back (it.n);
+        if (it.n.d >= stepsPerBeat || it.acc >= 1.2 || halfStepAbove) out.push_back (it.n);
     }
     return out;
 }
@@ -812,7 +849,7 @@ std::vector<Event> buildEvents (const State& st, const Analysis& A, bool withPat
 {
     const auto& T = timeSigs()[(size_t) st.ts];
     const auto& S = styleInfo (st.style);
-    const double L = T.beats, segB = A.segSteps / 2.0;
+    const double L = T.beats, segB = A.segSteps / (double) stepsPerBeat;
     const auto& chPat = T.beats == 4 ? S.ch4 : S.ch3;
     const auto& bsPat = T.beats == 4 ? S.bs4 : S.bs3;
     auto swing = [&] (double t) { return S.swing && std::abs (std::fmod (t, 1.0) - 0.5) < 1e-6 ? t + 0.16 : t; };
@@ -864,7 +901,7 @@ std::vector<Event> buildEvents (const State& st, const Analysis& A, bool withPat
 
     if (st.playMelody || ! withPattern)
         for (const auto& n : st.notes)
-            ev.push_back ({ swing (n.s / 2.0), n.d / 2.0 * 0.95, n.p, 2, 0.9f });
+            ev.push_back ({ swing (n.s / (double) stepsPerBeat), n.d / (double) stepsPerBeat * 0.95, n.p, 2, 0.9f });
 
     std::stable_sort (ev.begin(), ev.end(), [] (const Event& x, const Event& y) { return x.t < y.t; });
     return ev;
@@ -882,7 +919,7 @@ juce::MemoryBlock fullMidi (const State& st, const Analysis& A, double bpm)
 {
     const auto ev = buildEvents (st, A, st.patternMidi);
     std::vector<Event> mel;
-    for (const auto& n : st.notes) mel.push_back ({ n.s / 2.0, n.d / 2.0, n.p, 2, 0.9f });
+    for (const auto& n : st.notes) mel.push_back ({ n.s / (double) stepsPerBeat, n.d / (double) stepsPerBeat, n.p, 2, 0.9f });
     std::vector<MidiTrack> tracks { { "Chords", ofType (ev, 0), 1, 90 } };
     if (st.bass) tracks.push_back ({ "Bass", ofType (ev, 1), 2, 100 });
     tracks.push_back ({ "Melody", mel, 3, 96 });
@@ -930,29 +967,28 @@ ImportResult importMidi (const juce::File& file)
             const auto& m = seq.getEventPointer (i)->message;
             if (! m.isNoteOn() || m.getChannel() == 10) continue;
             auto off = seq.getTimeOfMatchingKeyUp (i);
-            if (off <= m.getTimeStamp()) off = m.getTimeStamp() + tpq / 2.0;
+            if (off <= m.getTimeStamp()) off = m.getTimeStamp() + tpq / 4.0;
             notes.push_back ({ m.getNoteNumber(), m.getTimeStamp(), off });
         }
         if (notes.size() > best.size()) best = notes;
     }
     if (best.empty()) { r.error = "No notes found in this file"; return r; }
 
-    // quantize to eighth notes and keep the top voice where notes overlap
-    const double step = tpq / 2.0;
-    std::map<int, Note> byStep;
+    // keep the notes as written: a fine grid (1/24 beat), every voice, original lengths
+    const double step = tpq / (double) stepsPerBeat;
+    std::vector<Note> out;
     for (const auto& n : best)
     {
-        const int s = (int) std::lround (n.on / step);
-        const int d = std::max (1, (int) std::lround ((n.off - n.on) / step));
-        auto it = byStep.find (s);
-        if (it == byStep.end() || n.p > it->second.p) byStep[s] = { n.p, s, d };
+        const Note note { n.p, (int) std::lround (n.on / step), std::max (1, (int) std::lround ((n.off - n.on) / step)) };
+        if (std::none_of (out.begin(), out.end(), [&] (const Note& o) { return o.p == note.p && o.s == note.s; }))
+            out.push_back (note);
     }
-    std::vector<Note> out;
-    for (auto& [s, n] : byStep) out.push_back (n);
-    for (size_t i = 0; i + 1 < out.size(); ++i) out[i].d = std::max (1, std::min (out[i].d, out[i + 1].s - out[i].s));
+    std::sort (out.begin(), out.end(), [] (const Note& a, const Note& b) { return a.s != b.s ? a.s < b.s : a.p < b.p; });
+    int lastEnd = 0;
+    for (const auto& n : out) lastEnd = std::max (lastEnd, n.s + n.d);
 
     const int spBar = timeSigs()[(size_t) r.ts].steps;
-    const int needed = (int) std::ceil ((out.back().s + out.back().d) / (double) spBar);
+    const int needed = (int) std::ceil (lastEnd / (double) spBar);
     r.bars = needed <= 4 ? 4 : needed <= 8 ? 8 : 16;
     for (auto n : out)
         if (n.s < r.bars * spBar) { n.d = std::min (n.d, r.bars * spBar - n.s); r.notes.push_back (n); }
@@ -972,7 +1008,7 @@ void loadPreset (State& st, const juce::String& name)
     {
         if (name != p.name) continue;
         st.notes.clear();
-        for (const auto& n : p.notes) st.notes.push_back ({ n[0], n[1], n[2] });
+        for (const auto& n : p.notes) st.notes.push_back ({ n[0], n[1] * stepsPerBeat / 2, n[2] * stepsPerBeat / 2 }); // written in eighths
         st.ts = p.ts; st.bars = p.bars; st.preset = name;
         st.keyLocked = false; st.locks.clear(); st.selected = 0; st.sugIdx = 0; st.seed = 0;
     }
@@ -984,6 +1020,7 @@ juce::var toVar (const State& st)
     juce::Array<juce::var> notes;
     for (const auto& n : st.notes) notes.add (juce::Array<juce::var> { n.p, n.s, n.d });
     o->setProperty ("notes", notes);
+    o->setProperty ("stepsPerBeat", stepsPerBeat);
     o->setProperty ("bars", st.bars);
     o->setProperty ("ts", st.ts);
     o->setProperty ("rhythm", st.rhythm);
@@ -1014,9 +1051,10 @@ juce::var toVar (const State& st)
 State fromVar (const juce::var& v)
 {
     State st;
+    const int scale = stepsPerBeat / juce::jmax (1, (int) v.getProperty ("stepsPerBeat", 2)); // older versions used eighths
     if (auto* notes = v["notes"].getArray())
         for (const auto& n : *notes)
-            if (n.size() >= 3) st.notes.push_back ({ (int) n[0], (int) n[1], (int) n[2] });
+            if (n.size() >= 3) st.notes.push_back ({ (int) n[0], (int) n[1] * scale, (int) n[2] * scale });
     st.bars = juce::jlimit (1, 16, (int) v.getProperty ("bars", 4));
     st.ts = juce::jlimit (0, 2, (int) v.getProperty ("ts", 0));
     st.rhythm = (double) v.getProperty ("rhythm", 1.0);

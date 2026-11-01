@@ -174,12 +174,9 @@ void ChordGenProcessor::drainAudio()
 void ChordGenProcessor::onPitchNote (const PitchTracker::DetectedNote& n)
 {
     if (! audioCapture.load() || ! captureOn.load()) return;
-    const auto loop = currentPattern()->loopBeats;
-    auto length = n.end - n.start;
-    if (length <= 0.0) length += loop - std::fmod (n.start, loop); // the note ran past the loop end
     const juce::SpinLock::ScopedLockType lock (captureLock);
     if (captured.size() < captured.capacity())
-        captured.push_back ({ n.pitch, n.start, n.start + length, n.pass });
+        captured.push_back ({ n.pitch, n.start, n.start + n.length, n.pass });
 }
 
 bool ChordGenProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -249,6 +246,12 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const double clockBeat = hostPlaying ? ppq : previewBeat;
 
     // A new capture pass starts when the clock starts, jumps back (loop) or crosses a loop boundary.
+    // unwrapped time keeps counting across FL's loop jumps, so note lengths stay exact
+    if (running && wasRunning && clockBeat + 1e-6 < lastPpq)
+        clockOffset += lastBlockEnd - clockBeat;
+    const double absBeat = clockBeat + clockOffset;
+    lastBlockEnd = clockBeat + numSamples * beatsPerSample;
+
     if (running)
     {
         const auto loopIndex = (long long) std::floor (clockBeat / loopBeats);
@@ -276,7 +279,7 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             acc += x;
             if (++accN >= decim && n < (int) scratch.size())
             {
-                scratch[(size_t) n++] = { acc / (float) accN, clockBeat + i * beatsPerSample, pass, running };
+                scratch[(size_t) n++] = { acc / (float) accN, clockBeat + i * beatsPerSample, absBeat + i * beatsPerSample, pass, running };
                 acc = 0.0f;
                 accN = 0;
             }
@@ -294,18 +297,17 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         auto m = meta.getMessage();
         const auto t = ppq + meta.samplePosition * beatsPerSample;
+        const auto tAbs = absBeat + meta.samplePosition * beatsPerSample;
 
         if (hostPlaying && captureOn.load() && m.isNoteOnOrOff())
         {
             const auto n = m.getNoteNumber();
             auto& open = openNotes[(size_t) n];
             if (m.isNoteOn())
-                open = { t, pass };
+                open = { t, tAbs, pass };
             else if (open.start >= 0.0)
             {
-                // a note-off for a note that ends at the loop end arrives after FL jumps back
-                auto length = t - open.start;
-                if (length <= 0.0) length += loopBeats - std::fmod (open.start, loopBeats);
+                const auto length = juce::jmax (0.0, tAbs - open.abs);
                 const juce::SpinLock::ScopedTryLockType lock (captureLock);
                 if (lock.isLocked() && captured.size() < captured.capacity())
                     captured.push_back ({ n, open.start, open.start + length, open.pass });
@@ -644,8 +646,8 @@ void ChordGenProcessor::onCapturedNotes (const std::vector<CapturedNote>& notes)
     {
         if (c.pass < pendingPass) continue; // late note of a pass that was already taken
         if (c.pass != pendingPass) { commitPending(); pendingPass = c.pass; }
-        const int s = ((int) std::lround (c.start * 2) % total + total) % total;
-        const int d = juce::jlimit (1, total - s, (int) std::lround ((c.end - c.start) * 2));
+        const int s = ((int) std::lround (c.start * cg::stepsPerBeat) % total + total) % total;
+        const int d = juce::jlimit (1, total - s, (int) std::lround ((c.end - c.start) * cg::stepsPerBeat));
         const bool dup = std::any_of (pending.begin(), pending.end(), [&] (const cg::Note& n) { return n.p == c.pitch && n.s == s; });
         if (! dup) pending.push_back ({ c.pitch, s, d });
     }

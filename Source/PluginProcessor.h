@@ -152,7 +152,7 @@ private:
 
     juce::SpinLock captureLock;
     std::vector<CapturedNote> captured;
-    struct OpenNote { double start = -1.0; int pass = 0; };
+    struct OpenNote { double start = -1.0, abs = 0.0; int pass = 0; };
     std::array<OpenNote, 128> openNotes {};
 
     juce::SpinLock auditionLock;
@@ -170,7 +170,7 @@ private:
     std::atomic<bool> infoHostPlaying { false }, infoActive { false };
 
     double sampleRate = 44100.0;
-    double previewBeat = 0.0, lastPpq = 0.0, lastPpqPlayed = 0.0;
+    double previewBeat = 0.0, lastPpq = 0.0, lastPpqPlayed = 0.0, lastBlockEnd = 0.0, clockOffset = 0.0;
     bool wasHostPlaying = false, wasActive = false, wasPreview = false, wasRunning = false;
     int pass = 0;
     std::atomic<int> currentPass { 0 };

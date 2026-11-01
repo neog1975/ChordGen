@@ -278,7 +278,8 @@ void PianoRoll::paint (juce::Graphics& g)
 
     for (int s = 0; s <= cols; ++s)
     {
-        const bool bar = s % T.steps == 0, beat = st.ts == 2 ? s % 3 == 0 : s % 2 == 0;
+        if (s % (cg::stepsPerBeat / 4) != 0) continue; // grid lines every 16th
+        const bool bar = s % T.steps == 0, beat = st.ts == 2 ? s % (cg::stepsPerBeat * 3 / 2) == 0 : s % cg::stepsPerBeat == 0;
         g.setColour (juce::Colour (bar ? 0xff384154 : beat ? 0xff1f2531 : 0xff161b24));
         g.fillRect (std::round ((float) s * cw), (float) head, 1.0f, H - (float) head);
     }
@@ -315,7 +316,7 @@ void PianoRoll::paint (juce::Graphics& g)
     if (playing)
     {
         g.setColour (juce::Colours::white);
-        g.fillRect ((float) playBeat * 2.0f * cw, 0.0f, 1.5f, H);
+        g.fillRect ((float) playBeat * (float) cg::stepsPerBeat * cw, 0.0f, 1.5f, H);
     }
     g.restoreState();
     g.setColour (theme::line);
@@ -344,14 +345,14 @@ void PianoRoll::mouseDown (const juce::MouseEvent& e)
     for (size_t i = 0; i < st.notes.size(); ++i)
     {
         const auto& n = st.notes[i];
-        if (n.p == p && step >= n.s && step < n.s + n.d)
+        if (n.p == p && step >= n.s && step < n.s + std::max (n.d, snap))
         {
             st.notes.erase (st.notes.begin() + (long) i);
             editor.proc.commit (true);
             return;
         }
     }
-    st.notes.push_back ({ p, step, 1 });
+    st.notes.push_back ({ p, step / snap * snap, snap }); // new notes snap to 16ths
     dragIndex = (int) st.notes.size() - 1;
     editor.audition (p);
     repaint();
@@ -364,7 +365,7 @@ void PianoRoll::mouseDrag (const juce::MouseEvent& e)
     auto& n = st.notes[(size_t) dragIndex];
     const int cols = st.bars * cg::timeSigs()[(size_t) st.ts].steps;
     const int step = (int) std::floor (e.position.x / cellW());
-    const int d = juce::jlimit (1, cols - n.s, step - n.s + 1);
+    const int d = juce::jlimit (snap, std::max (snap, cols - n.s), (step - n.s) / snap * snap + snap);
     if (d != n.d) { n.d = d; repaint(); }
 }
 
@@ -1003,7 +1004,7 @@ void ChordGenEditor::updatePlaying()
 {
     const auto info = proc.getHostInfo();
     const auto& A = proc.analysis;
-    const int seg = info.active ? juce::jmin (A.nSeg - 1, (int) std::floor (info.loopPos * 2.0 / A.segSteps)) : -1;
+    const int seg = info.active ? juce::jmin (A.nSeg - 1, (int) std::floor (info.loopPos * cg::stepsPerBeat / A.segSteps)) : -1;
     roll.playing = info.active;
     roll.playBeat = info.loopPos;
     if (info.active) roll.repaint();

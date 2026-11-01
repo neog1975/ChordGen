@@ -9,7 +9,8 @@
 struct AudioFrame
 {
     float x = 0.0f;
-    double beat = 0.0; // host ppq, or the preview clock
+    double beat = 0.0; // host ppq, or the preview clock (jumps back when the pattern loops)
+    double abs = 0.0;  // the same time, but counting on across loop jumps
     int pass = 0;      // capture pass at this sample
     bool clock = false; // a transport (FL or Preview) is running
 };
@@ -19,7 +20,7 @@ struct AudioFrame
 class PitchTracker
 {
 public:
-    struct DetectedNote { int pitch; double start, end; int pass; };
+    struct DetectedNote { int pitch; double start, length; int pass; };
 
     explicit PitchTracker (std::function<void (const DetectedNote&)> onNoteCallback);
 

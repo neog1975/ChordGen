@@ -32,11 +32,11 @@ int main()
             phase += 2 * 3.14159265 * f / rate;
             x = (float) (0.4 * std::sin (phase) + 0.2 * std::sin (2 * phase) + 0.1 * std::sin (3 * phase));
         }
-        frames[(size_t) i] = { x + noise (rng), beat, 1, true };
+        frames[(size_t) i] = { x + noise (rng), beat, beat, 1, true };
     }
     tracker.process (frames.data(), total);
     // a little silence to close the last note
-    std::vector<AudioFrame> tail (2000, AudioFrame { 0.0f, totalBeats, 1, true });
+    std::vector<AudioFrame> tail (2000, AudioFrame { 0.0f, totalBeats, totalBeats, 1, true });
     tracker.process (tail.data(), (int) tail.size());
 
     int hits = 0;
@@ -49,7 +49,7 @@ int main()
         std::cout << "expected " << n.pitch << " @" << n.start << (ok ? "  found\n" : "  MISSING\n");
     }
     std::cout << "detected:";
-    for (const auto& f : found) std::cout << " " << f.pitch << "@" << std::round (f.start * 100) / 100 << "-" << std::round (f.end * 100) / 100;
+    for (const auto& f : found) std::cout << " " << f.pitch << "@" << std::round (f.start * 100) / 100 << "-" << std::round ((f.start + f.length) * 100) / 100;
     std::cout << "\n" << hits << "/" << melody.size() << " notes found, " << found.size() << " detected\n";
     return hits == (int) melody.size() ? 0 : 1;
 }

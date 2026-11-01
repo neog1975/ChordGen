@@ -122,7 +122,7 @@ void PitchTracker::track (float midi, bool voiced, const AudioFrame& at)
     std::sort (sorted.begin(), sorted.end());
     const float smooth = sorted[sorted.size() / 2];
     pitch = smooth;
-    lastVoicedBeat = at.beat;
+    lastVoicedBeat = at.abs;
 
     if (current >= 0 && std::abs (smooth - (float) current) < 0.75f)
     {
@@ -138,7 +138,7 @@ void PitchTracker::track (float midi, bool voiced, const AudioFrame& at)
 
     if (candidateFrames >= 3)
     {
-        if (current >= 0) endNote (candidateAt.beat);
+        if (current >= 0) endNote (candidateAt.abs);
         current = candidate;
         currentAt = candidateAt;
         currentFrames = candidateFrames;
@@ -150,7 +150,7 @@ void PitchTracker::endNote (double endBeat)
 {
     // ignore blips shorter than about 60 ms and anything heard while no transport ran
     if (current >= 0 && currentFrames >= 5 && currentAt.clock && onNote)
-        onNote ({ current, currentAt.beat, endBeat, currentAt.pass });
+        onNote ({ current, currentAt.beat, endBeat - currentAt.abs, currentAt.pass });
     current = -1;
     currentFrames = 0;
     silentFrames = 0;
