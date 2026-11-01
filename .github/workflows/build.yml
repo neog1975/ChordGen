@@ -58,6 +58,8 @@ jobs:
           cp -R "build/ChordGenFX_artefacts/Release/VST3/ChordGen FX.vst3" pkg/
           cp -R build/ChordGen_artefacts/Release/Standalone/ChordGen.app pkg/
           cp -R "build/ChordGenFX_artefacts/Release/Standalone/ChordGen FX.app" pkg/
+          # moduleinfo.json is added after JUCE signs the bundle, so sign again (ad-hoc) and check
+          for b in pkg/*.vst3 pkg/*.app; do codesign --force --deep --sign - "$b" && codesign -v --strict "$b"; done
           ditto -c -k pkg ChordGen-macOS.zip
 
       - uses: actions/upload-artifact@v4
