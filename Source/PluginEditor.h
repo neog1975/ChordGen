@@ -47,7 +47,7 @@ private:
     juce::TextButton autoButton { "Auto-detect" };
 };
 
-class PianoRoll : public juce::Component, public juce::FileDragAndDropTarget
+class PianoRoll : public juce::Component
 {
 public:
     explicit PianoRoll (ChordGenEditor&);
@@ -55,8 +55,6 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
-    bool isInterestedInFileDrag (const juce::StringArray&) override;
-    void filesDropped (const juce::StringArray&, int, int) override;
 
     double playBeat = 0.0;
     bool playing = false;
@@ -124,8 +122,30 @@ private:
     juce::String text;
 };
 
+// ChordGen FX: covers the roll while an audio file is analysed, asks for its tempo when the host
+// has none (Standalone), or says why the file gave no chords.
+class ImportPanel : public juce::Component
+{
+public:
+    explicit ImportPanel (ChordGenProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void update(); // shows itself while there is something to show
+    void askTempo (const juce::File&, double bpm);
+
+private:
+    void start();
+
+    ChordGenProcessor& proc;
+    juce::TextButton button, cancelButton { "Cancel" };
+    juce::TextEditor bpmEditor;
+    juce::File askFile;
+    ChordGenProcessor::ImportStatus status;
+};
+
 //==============================================================================
 class ChordGenEditor : public juce::AudioProcessorEditor,
+                       public juce::FileDragAndDropTarget,
                        private juce::ChangeListener,
                        private juce::Timer
 {
@@ -136,13 +156,19 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
+    void paintOverChildren (juce::Graphics&) override;
+
+    bool isInterestedInFileDrag (const juce::StringArray&) override;
+    void filesDropped (const juce::StringArray&, int, int) override;
+    void fileDragEnter (const juce::StringArray&, int, int) override { dragHover = true; repaint(); }
+    void fileDragExit (const juce::StringArray&) override { dragHover = false; repaint(); }
 
     ChordGenProcessor& proc;
     int playSeg = -1;
 
     void edit (std::function<void (cg::State&)> change, bool resuggest = true);
     void selectSegment (int seg);
-    void importFile (const juce::File&);
+    void importFile (const juce::File&); // .mid, or an audio file in ChordGen FX
     void audition (int note) { proc.auditionNote (note); }
 
 private:
@@ -153,6 +179,7 @@ private:
     void updatePlaying();
     void writeDragFile();
     void chooseImport();
+    void importAudio (const juce::File&);
     void saveMidi();
 
     theme::LookAndFeel lnf;
@@ -188,6 +215,8 @@ private:
     juce::TextButton previewButton { "Preview" }, saveMidiButton { "Save MIDI..." };
     MidiDragButton dragButton;
     Toast toast;
+    ImportPanel importPanel;
+    bool dragHover = false;
 
     std::unique_ptr<juce::FileChooser> chooser;
     juce::MemoryBlock lastDragData;

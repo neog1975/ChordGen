@@ -1,5 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#if CHORDGEN_FX
+ #include "AudioImport.h"
+#endif
 
 namespace
 {
@@ -123,6 +126,34 @@ private:
     ChordGenProcessor& proc;
 };
 
+#if CHORDGEN_FX
+// Reads, transcribes and checks an audio file away from the message and audio threads.
+class AudioImportJob : public juce::Thread
+{
+public:
+    AudioImportJob (const juce::File& f, double b) : juce::Thread ("ChordGen audio import"), file (f), bpm (b) {}
+
+    void run() override
+    {
+        result = audioimport::analyseFile (file, [this] (float p) { progress = p; return ! threadShouldExit(); });
+        done = true;
+    }
+
+    const juce::File file;
+    const double bpm;
+    std::atomic<float> progress { 0.0f };
+    std::atomic<bool> done { false };
+    audioimport::Result result;
+};
+#else
+class AudioImportJob : public juce::Thread
+{
+public:
+    AudioImportJob() : juce::Thread ("unused") {}
+    void run() override {}
+};
+#endif
+
 ChordGenProcessor::ChordGenProcessor()
     : AudioProcessor (isFx ? BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
                                               .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
@@ -157,6 +188,7 @@ ChordGenProcessor::ChordGenProcessor()
 ChordGenProcessor::~ChordGenProcessor()
 {
     stopTimer();
+    cancelImport();
     if (pitchThread != nullptr)
         pitchThread->stopThread (1000);
 }
@@ -222,13 +254,13 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         buffer.clear (ch, 0, numSamples);
 
     double bpm = 120.0, ppq = 0.0;
-    bool hostPlaying = false;
+    bool hostPlaying = false, bpmKnown = false;
 
     if (auto* ph = getPlayHead())
     {
         if (auto pos = ph->getPosition())
         {
-            if (auto b = pos->getBpm()) bpm = *b;
+            if (auto b = pos->getBpm()) { bpm = *b; bpmKnown = true; }
             if (auto p = pos->getPpqPosition()) ppq = *p;
             hostPlaying = pos->getIsPlaying();
         }
@@ -457,6 +489,7 @@ void ChordGenProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     infoRunning = running;
 
     infoBpm = bpm;
+    infoBpmKnown = bpmKnown;
     infoHostPlaying = hostPlaying;
     infoActive = active;
 }
@@ -472,7 +505,7 @@ void ChordGenProcessor::applyPattern()
     cutoff = cg::styleInfo (state.style).cutoff;
     attack = state.style == cg::Style::trap ? 0.09f : 0.012f;
     beatsPerBar = cg::timeSigs()[(size_t) state.ts].beats;
-    audioCapture = state.source >= 3;
+    audioCapture = state.source == 3 || state.source == 4;
 
     const juce::SpinLock::ScopedLockType lock (patternLock);
     pattern = (optLive && livePattern != nullptr) ? livePattern : std::move (p);
@@ -601,6 +634,11 @@ std::vector<CapturedNote> ChordGenProcessor::popCapturedNotes()
 // Capture mode: collect the notes of one pass of the FL pattern, then take them as the melody.
 void ChordGenProcessor::timerCallback()
 {
+#if CHORDGEN_FX
+    if (importJob != nullptr && importJob->done.load())
+        finishImport();
+#endif
+
     const auto notes = popCapturedNotes();
     if (! notes.empty())
         onCapturedNotes (notes);
@@ -715,7 +753,79 @@ ChordGenProcessor::HostInfo ChordGenProcessor::getHostInfo() const
     h.loopPos = infoLoopPos.load();
     h.hostPlaying = infoHostPlaying.load();
     h.active = infoActive.load();
+    h.bpmKnown = infoBpmKnown.load();
     return h;
+}
+
+//==============================================================================
+void ChordGenProcessor::importAudio (const juce::File& file, double bpm)
+{
+#if CHORDGEN_FX
+    cancelImport();
+    notice = {};
+    importJob = std::make_unique<AudioImportJob> (file, bpm);
+    importJob->startThread (juce::Thread::Priority::low);
+    sendChangeMessage();
+#else
+    juce::ignoreUnused (file, bpm);
+#endif
+}
+
+void ChordGenProcessor::cancelImport()
+{
+    if (importJob == nullptr) return;
+    importJob->stopThread (10000);
+    importJob = nullptr;
+    sendChangeMessage();
+}
+
+ChordGenProcessor::ImportStatus ChordGenProcessor::importStatus() const
+{
+    ImportStatus s;
+#if CHORDGEN_FX
+    if (importJob != nullptr)
+    {
+        s.running = true;
+        s.progress = importJob->progress.load();
+        s.file = importJob->file.getFileName();
+    }
+#endif
+    return s;
+}
+
+void ChordGenProcessor::finishImport()
+{
+#if CHORDGEN_FX
+    const auto job = std::move (importJob);
+    job->stopThread (1000);
+    const auto& r = job->result;
+
+    auto reject = [this] (audioimport::Verdict v)
+    {
+        const auto m = audioimport::messageFor (v);
+        notice = { m.title, m.body, m.tip };
+        sendChangeMessage();
+    };
+    if (r.verdict != audioimport::Verdict::ok) { reject (r.verdict); return; }
+    const auto placed = audioimport::place (r.frames, job->bpm, state.ts);
+    if (placed.beats.empty()) { reject (audioimport::Verdict::noNotes); return; }
+
+    pushHistory();
+    state.notes.clear();
+    state.audio = placed.beats;
+    state.bars = placed.bars;
+    state.source = 5;
+    state.preset = {};
+    state.keyLocked = false;
+    state.locks.clear();
+    state.selected = 0;
+    commit (true);
+
+    juce::String text = "Listened to " + job->file.getFileName();
+    if (placed.firstBar > 0 || placed.totalBars > placed.firstBar + placed.bars)
+        text << " (bars " << placed.firstBar + 1 << "-" << placed.firstBar + placed.bars << " of " << placed.totalBars << ")";
+    showToast (text);
+#endif
 }
 
 void ChordGenProcessor::getStateInformation (juce::MemoryBlock& dest)

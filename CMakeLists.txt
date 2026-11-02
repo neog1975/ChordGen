@@ -10,6 +10,51 @@ option(CHORDGEN_COPY_PLUGIN "Copy the plugin to the system plugin folder after b
 
 add_subdirectory(JUCE)
 
+# Basic Pitch (Spotify's polyphonic transcription model) as embedded by NeuralNote, for ChordGen FX's
+# audio-file import: the CNN runs on RTNeural, the CQT front end is a native port (ThirdParty/BasicPitch).
+include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW) # downloaded files get the time of extraction
+endif()
+FetchContent_Declare(rtneural
+    URL https://github.com/jatinchowdhury18/RTNeural/archive/2ca066e5e529ea3ed4120c368ee16526eeaf2cec.tar.gz
+    URL_HASH SHA256=7adaba69ff8c0935418e273127bb45c3d4cb35a0023c4255f6449010058b8fa1
+    SOURCE_SUBDIR RTNeural) # the library only: RTNeural's top-level CMakeLists downloads CPM for its tests
+FetchContent_MakeAvailable(rtneural)
+target_compile_definitions(RTNeural PUBLIC RTNEURAL_USE_EIGEN=1 RTNEURAL_DEFAULT_ALIGNMENT=16)
+target_include_directories(RTNeural SYSTEM PUBLIC ${rtneural_SOURCE_DIR}/modules/Eigen ${rtneural_SOURCE_DIR}/modules/json)
+set_target_properties(RTNeural PROPERTIES SYSTEM TRUE)
+if(MSVC)
+    target_compile_options(RTNeural PRIVATE /w)
+else()
+    target_compile_options(RTNeural PRIVATE -w)
+endif()
+
+juce_add_binary_data(BasicPitchModel
+    NAMESPACE BasicPitchData
+    HEADER_NAME BasicPitchData.h
+    SOURCES
+        ThirdParty/BasicPitch/ModelData/cnn_contour_model.json
+        ThirdParty/BasicPitch/ModelData/cnn_note_model.json
+        ThirdParty/BasicPitch/ModelData/cnn_onset_1_model.json
+        ThirdParty/BasicPitch/ModelData/cnn_onset_2_model.json
+        ThirdParty/BasicPitch/ModelData/features_cqt.bin)
+
+set(BASICPITCH_SOURCES
+    ThirdParty/BasicPitch/BasicPitch.cpp
+    ThirdParty/BasicPitch/BasicPitchCNN.cpp
+    ThirdParty/BasicPitch/Features.cpp
+    ThirdParty/BasicPitch/Notes.cpp)
+set_source_files_properties(${BASICPITCH_SOURCES} PROPERTIES COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/w,-w>")
+set(AUDIOIMPORT_SOURCES Source/AudioImport.cpp ${BASICPITCH_SOURCES})
+
+# Adds audio-file import (sources, model data, modules) to a target that already has the JUCE modules.
+function(chordgen_audio_import target)
+    target_sources(${target} PRIVATE ${AUDIOIMPORT_SOURCES})
+    target_include_directories(${target} SYSTEM PRIVATE ThirdParty/BasicPitch)
+    target_link_libraries(${target} PRIVATE RTNeural BasicPitchModel juce::juce_audio_formats juce::juce_dsp)
+endfunction()
+
 set(CHORDGEN_SOURCES
     Source/Engine.cpp
     Source/Pitch.cpp
@@ -57,6 +102,9 @@ function(chordgen_plugin target product code is_fx)
             juce::juce_recommended_config_flags
             juce::juce_recommended_lto_flags
             juce::juce_recommended_warning_flags)
+    if(is_fx)
+        chordgen_audio_import(${target})
+    endif()
 endfunction()
 
 chordgen_plugin(ChordGen "ChordGen" Chgn FALSE)
@@ -72,6 +120,11 @@ if(CHORDGEN_TESTS)
     juce_add_console_app(PitchTests PRODUCT_NAME "PitchTests")
     target_sources(PitchTests PRIVATE Tests/PitchTest.cpp Source/Pitch.cpp)
     target_link_libraries(PitchTests PRIVATE juce::juce_core juce::juce_recommended_config_flags)
+
+    juce_add_console_app(AudioImportTests PRODUCT_NAME "AudioImportTests")
+    target_sources(AudioImportTests PRIVATE Tests/AudioImportTest.cpp Source/Engine.cpp)
+    target_link_libraries(AudioImportTests PRIVATE juce::juce_audio_basics juce::juce_recommended_config_flags)
+    chordgen_audio_import(AudioImportTests)
 endif()
 
 if(CHORDGEN_TESTS)

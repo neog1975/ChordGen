@@ -87,8 +87,36 @@ Spelled spell (const Chord& c, int cx, bool minor)
     return c.semi == 0 ? Spelled { "6/9", { 0, 4, 7, 9, 14 } } : Spelled { "maj9", { 0, 4, 7, 11, 14 } };
 }
 
+// An audio file's beats as items: one per pitch class that sounds in the beat, weighted by its energy.
+std::vector<Item> audioItemsIn (const State& st, int a, int b)
+{
+    const auto& T = timeSigs()[(size_t) st.ts];
+    std::vector<Item> out;
+    for (int k = a / stepsPerBeat; k * stepsPerBeat < b && k < (int) st.audio.size(); ++k)
+    {
+        const int s0 = k * stepsPerBeat, ov = std::min (b, s0 + stepsPerBeat) - std::max (a, s0);
+        if (ov <= 0) continue;
+        const auto& ch = st.audio[(size_t) k].chroma;
+        const float peak = *std::max_element (ch.begin(), ch.end());
+        const double acc = accentAt (T, s0);
+        for (int pc = 0; pc < 12; ++pc)
+            if (ch[(size_t) pc] > 0.02f && ch[(size_t) pc] >= 0.15f * peak)
+                out.push_back ({ { 60 + pc, s0, stepsPerBeat }, ch[(size_t) pc] * ov * acc, acc, true });
+    }
+    return out;
+}
+
+std::array<double, 12> bassIn (const State& st, int a, int b)
+{
+    std::array<double, 12> out {};
+    for (int k = a / stepsPerBeat; k * stepsPerBeat < b && k < (int) st.audio.size(); ++k)
+        for (size_t pc = 0; pc < 12; ++pc) out[pc] += st.audio[(size_t) k].bass[pc];
+    return out;
+}
+
 std::vector<Item> itemsIn (const State& st, int a, int b)
 {
+    if (usesAudio (st)) return audioItemsIn (st, a, b);
     const auto& T = timeSigs()[(size_t) st.ts];
     std::vector<Item> out;
     for (const auto& n : st.notes)
@@ -106,6 +134,14 @@ std::array<double, 12> pcWeights (const State& st)
 {
     const auto& T = timeSigs()[(size_t) st.ts];
     std::array<double, 12> w {};
+    if (usesAudio (st))
+    {
+        const int beats = std::min ((int) st.audio.size(), st.bars * T.steps / stepsPerBeat);
+        for (int k = 0; k < beats; ++k)
+            for (size_t pc = 0; pc < 12; ++pc)
+                w[pc] += (st.audio[(size_t) k].chroma[pc] + 0.5 * st.audio[(size_t) k].bass[pc]) * accentAt (T, k * stepsPerBeat);
+        return w;
+    }
     for (const auto& n : st.notes)
         w[(size_t) (n.p % 12)] += n.d * accentAt (T, n.s);
 
@@ -319,6 +355,46 @@ Fit fit (const Chord& c, const std::vector<Item>& items, int cx, const Analysis&
     }
     if (tot <= 0) return {};
     return { sc / tot, (int) std::lround (good / tot * 100.0) };
+}
+
+// Chord recognition for an audio file: the chord's tones should carry the sound, tones outside it
+// count against it, a missing chord tone too, and the bass names the root.
+Fit fitAudio (const Chord& c, const std::vector<Item>& items, const std::array<double, 12>& bass, int cx, const Analysis& A)
+{
+    std::array<double, 12> ch {};
+    double tot = 0;
+    for (const auto& it : items) { ch[(size_t) (it.n.p % 12)] += it.w; tot += it.w; }
+    if (tot <= 0) return {};
+    const double peak = *std::max_element (ch.begin(), ch.end());
+
+    const auto ts = toneSets (c, cx, A.minor);
+    double sc = 0, good = 0;
+    for (int pc = 0; pc < 12; ++pc)
+    {
+        const double e = ch[(size_t) pc];
+        const int rel = mod12 (pc - c.root);
+        double cr;
+        if (contains (ts.tri, rel)) { cr = 1.0; good += e; }
+        else if (contains (ts.ext, rel)) { cr = 0.4; good += e; }
+        else if (rel == c.sev || rel == c.nin) cr = -0.2;
+        else cr = A.scale[(size_t) pc] ? -0.8 : -1.1;
+        sc += e * cr;
+    }
+    sc /= tot;
+    for (auto rel : ts.tri)
+        if (ch[(size_t) mod12 (c.root + rel)] < 0.15 * peak) sc -= 0.35;
+
+    const double bassTot = std::accumulate (bass.begin(), bass.end(), 0.0);
+    if (bassTot > 0)
+    {
+        for (int pc = 0; pc < 12; ++pc)
+        {
+            const double b = bass[(size_t) pc] / bassTot;
+            const int rel = mod12 (pc - c.root);
+            sc += b * (rel == 0 ? 0.6 : contains (ts.tri, rel) ? 0.1 : contains (ts.ext, rel) ? 0.0 : -0.4);
+        }
+    }
+    return { sc, (int) std::lround (good / tot * 100.0) };
 }
 
 double trans (const Chord& a, const Chord& b, const StyleInfo& st, bool minor)
@@ -729,6 +805,8 @@ juce::String segmentLabel (int i, double rhythm)
     return "Bar " + juce::String (i + 1);
 }
 
+bool usesAudio (const State& st) { return st.source == 5 && ! st.audio.empty(); }
+
 Analysis analyse (State& st, bool resuggest)
 {
     Analysis A;
@@ -737,7 +815,7 @@ Analysis analyse (State& st, bool resuggest)
     A.nSeg = std::max (1, (int) std::lround (st.bars * st.rhythm));
 
     const auto w = pcWeights (st);
-    A.keys = st.notes.empty() ? std::vector<KeyCandidate> { { { 9, 1 }, 0.0 } } : detectKeys (st, w);
+    A.keys = st.notes.empty() && ! usesAudio (st) ? std::vector<KeyCandidate> { { { 9, 1 }, 0.0 } } : detectKeys (st, w);
     A.key = st.keyLocked ? st.keyLock : A.keys.front().key;
     A.minor = modes()[(size_t) A.key.mode].minor;
     A.flats = flatsFor (A.key);
@@ -747,8 +825,10 @@ Analysis analyse (State& st, bool resuggest)
     for (int i = 0; i < A.nSeg; ++i)
     {
         A.items.push_back (itemsIn (st, i * A.segSteps, (i + 1) * A.segSteps));
+        const auto bass = bassIn (st, i * A.segSteps, (i + 1) * A.segSteps);
         std::vector<Fit> row;
-        for (const auto& c : A.chords) row.push_back (fit (c, A.items.back(), st.complexity, A));
+        for (const auto& c : A.chords)
+            row.push_back (usesAudio (st) ? fitAudio (c, A.items.back(), bass, st.complexity, A) : fit (c, A.items.back(), st.complexity, A));
         A.fits.push_back (std::move (row));
     }
 
@@ -800,6 +880,7 @@ std::vector<int> alternatives (const State& st, const Analysis& A, int i)
 
 std::vector<Note> clashes (const State& st, const Analysis& A, const Chord& c, int seg)
 {
+    if (usesAudio (st)) return {}; // no notes to mark
     const auto ts = toneSets (c, st.complexity, A.minor);
     std::vector<Note> out;
     for (const auto& it : A.items[(size_t) seg])
@@ -819,8 +900,12 @@ Explanation explain (const State& st, const Analysis& A, int i)
     const auto name = chordName (c, A, st.complexity);
     Explanation e;
     e.text = "Why " + name + "?  ";
-    e.text += f.pct < 0 ? juce::String ("No melody here, so the progression decides.")
-                        : "It covers " + juce::String (f.pct) + "% of the weighted melody in " + segmentLabel (i, st.rhythm).toLowerCase() + ".";
+    if (usesAudio (st))
+        e.text += f.pct < 0 ? juce::String ("The audio is silent here, so the progression decides.")
+                            : "Its tones carry " + juce::String (f.pct) + "% of the sound in " + segmentLabel (i, st.rhythm).toLowerCase() + ".";
+    else
+        e.text += f.pct < 0 ? juce::String ("No melody here, so the progression decides.")
+                            : "It covers " + juce::String (f.pct) + "% of the weighted melody in " + segmentLabel (i, st.rhythm).toLowerCase() + ".";
     if (i > 0) e.text += " " + transText (A, A.chordAt (i - 1), c, st.complexity);
     else if (A.nSeg > 1) e.text += " Loops back from " + chordName (A.chordAt (A.nSeg - 1), A, st.complexity) + ".";
     if (c.borrowed) e.text += " " + c.tag.substring (0, 1).toUpperCase() + c.tag.substring (1) + ".";
@@ -834,7 +919,7 @@ Explanation explain (const State& st, const Analysis& A, int i)
 
 int keyMatchPercent (const State& st, const Analysis& A)
 {
-    if (st.notes.empty()) return 0;
+    if (st.notes.empty() && ! usesAudio (st)) return 0;
     double r = A.keys.front().r;
     if (st.keyLocked)
     {
@@ -1020,6 +1105,15 @@ juce::var toVar (const State& st)
     juce::Array<juce::var> notes;
     for (const auto& n : st.notes) notes.add (juce::Array<juce::var> { n.p, n.s, n.d });
     o->setProperty ("notes", notes);
+    juce::Array<juce::var> audio;
+    for (const auto& b : st.audio)
+    {
+        juce::Array<juce::var> v;
+        for (auto x : b.chroma) v.add (juce::jlimit (0, 255, (int) std::lround (x * 255.0f)));
+        for (auto x : b.bass) v.add (juce::jlimit (0, 255, (int) std::lround (x * 255.0f)));
+        audio.add (v);
+    }
+    o->setProperty ("audio", audio);
     o->setProperty ("stepsPerBeat", stepsPerBeat);
     o->setProperty ("bars", st.bars);
     o->setProperty ("ts", st.ts);
@@ -1055,6 +1149,14 @@ State fromVar (const juce::var& v)
     if (auto* notes = v["notes"].getArray())
         for (const auto& n : *notes)
             if (n.size() >= 3) st.notes.push_back ({ (int) n[0], (int) n[1] * scale, (int) n[2] * scale });
+    if (auto* audio = v["audio"].getArray())
+        for (const auto& b : *audio)
+        {
+            AudioBeat beat;
+            if (b.size() >= 24)
+                for (int i = 0; i < 12; ++i) { beat.chroma[(size_t) i] = (float) (int) b[i] / 255.0f; beat.bass[(size_t) i] = (float) (int) b[12 + i] / 255.0f; }
+            st.audio.push_back (beat);
+        }
     st.bars = juce::jlimit (1, 16, (int) v.getProperty ("bars", 4));
     st.ts = juce::jlimit (0, 2, (int) v.getProperty ("ts", 0));
     st.rhythm = (double) v.getProperty ("rhythm", 1.0);
@@ -1077,7 +1179,7 @@ State fromVar (const juce::var& v)
     st.sugIdx = (int) v.getProperty ("sugIdx", 0);
     st.seed = (int) v.getProperty ("seed", 0);
     st.selected = (int) v.getProperty ("selected", 0);
-    st.source = juce::jlimit (0, 4, (int) v.getProperty ("source", 0));
+    st.source = juce::jlimit (0, 5, (int) v.getProperty ("source", 0));
     st.preset = v.getProperty ("preset", "").toString();
     return st;
 }
