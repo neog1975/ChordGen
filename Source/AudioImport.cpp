@@ -172,7 +172,7 @@ bool measureAudio (Cues& c, const juce::AudioBuffer<float>& audio, double sr, co
     }
 
     const double binHz = bpRate / size;
-    auto bin = [binHz] (double hz) { return juce::jlimit (0, bins - 1, (int) std::lround (hz / binHz)); };
+    auto bin = [binHz, lastBin = bins - 1] (double hz) { return juce::jlimit (0, lastBin, (int) std::lround (hz / binHz)); };
     const int low0 = bin (40.0), low1 = bin (150.0), high0 = bin (5000.0), crack0 = bin (1500.0), crack1 = bin (8000.0);
 
     // harmonic/percussive split: a bin is percussive when the median across frequency beats the
