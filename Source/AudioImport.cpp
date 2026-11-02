@@ -3,7 +3,6 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
 #include "BasicPitch.h"
-#include "dsp/MixAnalyzer.h"
 
 namespace audioimport
 {
@@ -54,10 +53,6 @@ Message messageFor (Verdict v)
 {
     switch (v)
     {
-        case Verdict::fullSong:
-            return { "This looks like a full song.",
-                     "ChordGen detects chords from isolated stems only (e.g. piano, guitar, synth or bass).",
-                     juce::String::fromUTF8 ("Tip: In FL Studio, right-click the clip in the Playlist \xe2\x86\x92 Stem separation, then drop the instrument stem here.") };
         case Verdict::drumsOnly:
             return { "No chords found.",
                      "This file sounds like drums or percussion only. Drop a melodic or harmonic stem instead.", {} };
@@ -136,25 +131,6 @@ bool measureAudio (Cues& c, const juce::AudioBuffer<float>& audio, double sr, co
     c = {};
     c.seconds = (double) audio.getNumSamples() / sr;
 
-    // loudness and crest factor, with Forge Master's analyser
-    {
-        const int n = audio.getNumSamples();
-        const float* L = audio.getReadPointer (0);
-        const float* R = audio.getReadPointer (juce::jmin (1, audio.getNumChannels() - 1));
-        MixAnalyzer mix;
-        mix.prepare (sr, (float) c.seconds);
-        mix.start();
-        MixAnalyzer::Result res;
-        const int block = 4096;
-        for (int pos = 0; pos < n; pos += block)
-            mix.process (L + pos, R + pos, juce::jmin (block, n - pos), true);
-        std::vector<float> zeros ((size_t) block, 0.0f);
-        for (int k = 0; k < 16 && ! mix.takeResult (res); ++k) // rounding of the length
-            mix.process (zeros.data(), zeros.data(), block, true);
-        c.lufs = res.integratedLufs;
-        c.crestDb = res.crestDb;
-    }
-
     // spectrogram of the 22050 Hz mono signal: 1024-point frames, hop 512 (23 ms)
     constexpr int order = 10, size = 1 << order, hop = size / 2, bins = size / 2 + 1;
     const int frames = (int) y.size() >= size ? ((int) y.size() - size) / hop + 1 : 0;
@@ -176,7 +152,7 @@ bool measureAudio (Cues& c, const juce::AudioBuffer<float>& audio, double sr, co
 
     const double binHz = bpRate / size;
     auto bin = [binHz, lastBin = bins - 1] (double hz) { return juce::jlimit (0, lastBin, (int) std::lround (hz / binHz)); };
-    const int low0 = bin (40.0), low1 = bin (150.0), high0 = bin (5000.0), crack0 = bin (1500.0), crack1 = bin (8000.0);
+    const int low0 = bin (40.0), low1 = bin (150.0), crack0 = bin (1500.0), crack1 = bin (8000.0);
 
     // harmonic/percussive split: a bin is percussive when the median across frequency beats the
     // median across time (Fitzgerald 2010)
@@ -209,41 +185,26 @@ bool measureAudio (Cues& c, const juce::AudioBuffer<float>& audio, double sr, co
         c.percussive = total > 0.0 ? perc / total : 0.0;
     }
 
-    std::vector<double> eLow ((size_t) frames), eMid ((size_t) frames), eHigh ((size_t) frames), eTot ((size_t) frames),
-                        kick ((size_t) frames), crack ((size_t) frames);
+    std::vector<double> eTot ((size_t) frames), kick ((size_t) frames), crack ((size_t) frames);
     double loudest = 0.0;
     for (int t = 0; t < frames; ++t)
     {
         const size_t row = (size_t) t * bins;
-        double lo = 0, mid = 0, hi = 0;
         for (int k = 1; k < bins; ++k)
         {
             const double e = (double) S[row + (size_t) k] * S[row + (size_t) k];
-            if (k >= low0 && k < low1) lo += e;
-            else if (k >= low1 && k < high0) mid += e;
-            else if (k >= high0) hi += e;
+            eTot[(size_t) t] += e;
             if (isPerc[row + (size_t) k])
             {
                 if (k >= low0 && k < low1) kick[(size_t) t] += e;
                 if (k >= crack0 && k < crack1) crack[(size_t) t] += e;
             }
         }
-        eLow[(size_t) t] = lo; eMid[(size_t) t] = mid; eHigh[(size_t) t] = hi;
-        eTot[(size_t) t] = lo + mid + hi;
         loudest = std::max (loudest, eTot[(size_t) t]);
     }
 
-    // full-band frames: lows, mids and highs all present, most of the time
-    int active = 0, full = 0;
-    for (int t = 0; t < frames; ++t)
-    {
-        const double tot = eTot[(size_t) t];
-        if (tot < loudest * 1e-4) continue;
-        ++active;
-        if (dbOf (eLow[(size_t) t] / tot) > -22.0 && dbOf (eMid[(size_t) t] / tot) > -12.0 && dbOf (eHigh[(size_t) t] / tot) > -32.0)
-            ++full;
-    }
-    c.fullBand = active > 0 ? (double) full / active : 0.0;
+    int active = 0; // frames within 40 dB of the loudest
+    for (auto e : eTot) active += e >= loudest * 1e-4;
     c.sounding = (double) active / frames;
 
     // drum hits: sudden rises of the percussive part at 40-150 Hz (kick) and 1.5-8 kHz (snare, claps,
@@ -274,20 +235,11 @@ void measureNotes (Cues& c, const std::vector<NoteEvent>& events)
     const double step = 0.05;
     const int n = (int) std::ceil (c.seconds / step);
     if (n <= 0) return;
-    int covered = 0, dense = 0;
+    int covered = 0;
     for (int i = 0; i < n; ++i)
     {
         const double t = i * step;
-        int count = 0, lo = 128, hi = -1;
-        for (const auto& e : events)
-            if (e.start <= t && e.end > t)
-            {
-                ++count;
-                lo = std::min (lo, e.pitch);
-                hi = std::max (hi, e.pitch);
-            }
-        if (count > 0) ++covered;
-        if (count >= 4 && lo <= 52 && hi >= 72) ++dense;
+        covered += std::any_of (events.begin(), events.end(), [t] (const NoteEvent& e) { return e.start <= t && e.end > t; });
     }
     std::array<double, 12> pcTime {};
     double noteTime = 0.0;
@@ -300,31 +252,18 @@ void measureNotes (Cues& c, const std::vector<NoteEvent>& events)
 
     const double sounding = juce::jmax (1.0, c.sounding * n);
     c.noteCoverage = juce::jmin (1.0, covered / sounding);
-    c.dense = juce::jmin (1.0, dense / sounding);
 }
 
-// Each cue alone also fits some stems (a loud synth, a piano playing bass and chords, a plucky bass),
-// so a file is called a full song only when most of them agree.
+// Full songs are welcome: with the bass, the chords and the melody together the harmony is clearest.
+// Only files without harmony are turned away.
 Verdict classify (const Cues& c)
 {
-    // kick and snare hits together: stems have one or the other (plucked bass, strummed chords)
-    const bool drums = c.kickRate >= 0.5 && c.snareRate >= 0.5;
-    const bool harmony = c.noteCoverage >= 0.4;
     const double hits = c.kickRate + c.snareRate;
 
     // drums only: mostly percussive, or percussive with few notes or all notes on one pitch (a tuned kick)
     if (hits >= 0.5 && ((c.percussive >= 0.5 && c.noteCoverage < 0.5)
                         || (c.percussive >= 0.25 && (c.noteCoverage < 0.25 || c.onePitch >= 0.9))))
         return Verdict::drumsOnly;
-
-    const bool drumsAndHarmony = drums && harmony;
-    const bool fullBand = c.fullBand >= 0.6;
-    const bool mastered = c.lufs >= -15.0 && c.lufs <= -5.0 && c.crestDb <= 13.0;
-    const bool dense = c.dense >= 0.3;
-    const int score = (int) drumsAndHarmony + (int) fullBand + (int) mastered + (int) dense;
-    // a finished song is mastered; a loud, bright, pumping synth stem can have the other three
-    if (score >= 3 && mastered && (drumsAndHarmony || fullBand))
-        return Verdict::fullSong;
 
     // a few stray notes (risers, impacts, effects) give no chords worth showing
     if (c.noteCoverage < 0.1)

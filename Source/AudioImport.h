@@ -4,9 +4,9 @@
 #include <functional>
 #include "Engine.h"
 
-// ChordGen FX: chords for an audio file (a stem). Runs off the message and audio threads:
-// reads the file, transcribes it with Basic Pitch (polyphonic) and checks that it is an
-// isolated stem, not a full song or a drum loop, before its notes reach the engine.
+// ChordGen FX: chords for an audio file (a stem or a whole song). Runs off the message and audio
+// threads: reads the file, listens to it with Basic Pitch (polyphonic) and turns away files without
+// harmony (drums, effects) before its sound reaches the engine.
 namespace audioimport
 {
 constexpr double maxSeconds = 180.0; // only the start of longer files is analysed
@@ -19,14 +19,11 @@ struct Cues
     double seconds = 0.0, sounding = 1.0;  // length, and the share of it that is not silent
     double kickRate = 0.0, snareRate = 0.0; // strong low thumps / noisy cracks
     double percussive = 0.0;                // spectral energy that is percussive rather than harmonic
-    double fullBand = 0.0;                  // frames with energy at 40-150 Hz, in the mids and above 5 kHz
-    double lufs = -100.0, crestDb = 0.0;    // integrated loudness and peak-to-RMS
     double noteCoverage = 0.0;              // sounding time with at least one transcribed note
-    double dense = 0.0;                     // sounding time with 4+ notes reaching from the bass to the highs
     double onePitch = 0.0;                  // note time on the most common pitch class (a tuned kick: 1)
 };
 
-enum class Verdict { ok, fullSong, drumsOnly, noNotes, unreadable };
+enum class Verdict { ok, drumsOnly, noNotes, unreadable };
 
 struct Message { juce::String title, body, tip; };
 Message messageFor (Verdict);

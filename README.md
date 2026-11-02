@@ -50,11 +50,10 @@ Drop an audio file onto ChordGen FX, or click **Load audio...**. ChordGen listen
 2. Keeps the audio as sound, not MIDI: per beat, how strongly each of the 12 note names sounds, and which note is lowest. The roll shows this, each row a note name, the current chord's tones lit up. Using FL's tempo (the Standalone app asks for it), it starts at the first bar that sounds and assumes the file starts on a bar line. Up to 16 bars are used.
 3. Recognises the chord in each bar from that sound: the chord's tones should carry the sound, other tones count against it, and the lowest note names the root. Style, complexity, locks and Regenerate work as for a melody.
 
-On ten 128 BPM chord stems from a sample pack, the root and major/minor heard matched the producer's MIDI in 56 of 76 bars; most of the rest were extended chords that read either way (Cmaj7 or Em, Am7/G or G6). On the keyboard and synth stems of a song, 31 of 32 bars. Stems that play chords work best: a guitar riff or a bass line on its own does not show the chord, and gives wrong chords.
+On ten 128 BPM chord stems from a sample pack, the root and major/minor heard matched the producer's MIDI in 56 of 76 bars; most of the rest were extended chords that read either way (Cmaj7 or Em, Am7/G or G6). On the keyboard and synth stems of a song, 31 of 32 bars. Whole songs work well too, since the bass, the chords and the melody together make the harmony clear. Stems that play chords work best; a guitar riff or a bass line on its own does not show the chord, and gives wrong chords.
 
-Use **isolated stems**: piano, guitar, synth, pad, strings or bass. Before suggesting chords, ChordGen checks the file and says so in place of wrong chords:
+Drop a whole song or a stem that plays chords (piano, keys, synth, pad, guitar chords). Files without harmony get a message in place of chords:
 
-- **Full song.** Kick and snare hits together with harmonic content; energy in the lows (40-150 Hz), the mids and above 5 kHz most of the time; mastered loudness (about -5 to -15 LUFS) with a low crest factor; Basic Pitch hearing many notes at once from the bass to the highs. A file needs most of these, mastered loudness always, to count as a full song, so an unmastered mix of a whole song gets through. In FL Studio, right-click the clip in the Playlist and choose Stem separation, then drop the instrument stem.
 - **Drums or percussion only.** Mostly percussive sound, with hardly any notes, or with every note on one pitch (a tuned kick).
 - **No notes.** Risers, impacts and other effects with only a few stray notes.
 
@@ -80,7 +79,7 @@ Configure with `-DCHORDGEN_TESTS=ON` to build:
 
 - `ChordGenTests`: simulates FL playing a melody and checks capture timing and MIDI import
 - `PitchTests`: runs a synthetic sung melody through the pitch tracker
-- `AudioImportTests [files]`: runs a synthetic piano stem, bass stem, mastered full mix and drum loop through Basic Pitch and the stem / full song / drums check, and checks the chords heard in the piano stem. Given audio files, it reports what it hears in each instead; `--chords <bpm> stem.wav chords.mid ...` compares the chords heard with the chords in MIDI files
+- `AudioImportTests [files]`: runs a synthetic piano stem, bass stem, mastered full mix and drum loop through Basic Pitch and the check for files without harmony, and checks the chords heard in the piano stem and the full mix. Given audio files, it reports what it hears in each instead; `--chords <bpm> stem.wav chords.mid ...` compares the chords heard with the chords in MIDI files
 - `MidiBatch <folder>`: imports every MIDI file in a folder and reports any note whose timing changed
 - `ChordEval <folders> [--songs]`: compares ChordGen's chords with the chords producers wrote in chord packs or full arrangements
 
@@ -93,5 +92,3 @@ ChordGen FX includes third-party code and a machine-learning model, each under i
 - **Basic Pitch** model and weights by Spotify: [Apache License 2.0](ThirdParty/BasicPitch/LICENSE) ([notice](ThirdParty/BasicPitch/NOTICE-basic-pitch))
 - **NeuralNote**'s C++ port of Basic Pitch by Damien Ronssin and Tibor Vass: [Apache License 2.0](ThirdParty/BasicPitch/LICENSE). The changed and new files are listed in [ThirdParty/BasicPitch](ThirdParty/BasicPitch/README.md)
 - **RTNeural** by Jatin Chowdhury: BSD 3-Clause, downloaded at build time (with Eigen, MPL 2.0, and nlohmann/json, MIT)
-
-The Forge Master loudness and spectrum analysers in `Source/dsp` are by ChordGen's author and are AGPLv3 like the rest.

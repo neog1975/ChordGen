@@ -1,11 +1,10 @@
-// Runs synthetic audio through ChordGen FX's audio-file import: Basic Pitch and the stem / full song /
-// drums classifier. A piano stem and a bass stem must pass, and ChordGen must hear the piano's chords;
-// a mastered full mix and a drum loop must be rejected.
+// Runs synthetic audio through ChordGen FX's audio-file import: Basic Pitch and the check for files
+// without harmony. ChordGen must hear the chords of a piano stem and of a mastered full mix, accept a
+// bass stem, and turn away a drum loop.
 // Run: build/AudioImportTests_artefacts/Release/AudioImportTests
 //      ... file ...                                 reports what ChordGen hears in audio files
 //      ... --chords <bpm> stem.wav chords.mid ...   compares the chords heard with the chords in a MIDI file
 #include "../Source/AudioImport.h"
-#include "../Source/dsp/LoudnessMeter.h"
 #include <climits>
 #include <numeric>
 
@@ -122,30 +121,13 @@ juce::AudioBuffer<float> stereo (const std::vector<float>& mono, float peakDb)
     return b;
 }
 
-float lufsOf (const juce::AudioBuffer<float>& b)
-{
-    LoudnessMeter m;
-    m.prepare (sr);
-    m.process (b.getReadPointer (0), b.getReadPointer (1), b.getNumSamples());
-    return m.getIntegrated();
-}
-
-// A crude master: drive into a soft clipper until the mix reaches about -9 LUFS.
+// A crude master: drive into a soft clipper, then up to -0.3 dBFS.
 juce::AudioBuffer<float> master (std::vector<float> mix)
 {
-    float drive = 1.0f;
-    juce::AudioBuffer<float> b;
-    for (int k = 0; k < 40; ++k)
-    {
-        auto x = mix;
-        float peak = 0.0f;
-        for (auto v : mix) peak = std::max (peak, std::abs (v));
-        for (auto& v : x) v = 0.94f * std::tanh (drive * v / peak);
-        b = stereo (x, -0.3f);
-        if (lufsOf (b) >= -9.5f) break;
-        drive *= 1.25f;
-    }
-    return b;
+    float peak = 0.0f;
+    for (auto v : mix) peak = std::max (peak, std::abs (v));
+    for (auto& v : mix) v = std::tanh (4.0f * v / peak);
+    return stereo (mix, -0.3f);
 }
 
 std::vector<float> sum (std::initializer_list<std::vector<float>> parts)
@@ -159,7 +141,7 @@ std::vector<float> sum (std::initializer_list<std::vector<float>> parts)
 const char* name (audioimport::Verdict v)
 {
     using V = audioimport::Verdict;
-    return v == V::ok ? "stem" : v == V::fullSong ? "full song" : v == V::drumsOnly ? "drums only" : v == V::noNotes ? "no notes" : "unreadable";
+    return v == V::ok ? "accepted" : v == V::drumsOnly ? "drums only" : v == V::noNotes ? "no notes" : "unreadable";
 }
 
 void print (const char* label, const audioimport::Result& r)
@@ -167,9 +149,7 @@ void print (const char* label, const audioimport::Result& r)
     const auto& c = r.cues;
     std::cout << label << ": " << name (r.verdict) << "\n"
               << "  kick " << juce::String (c.kickRate, 2) << "/s, snare " << juce::String (c.snareRate, 2) << "/s, percussive "
-              << juce::String (c.percussive, 2) << ", full band " << juce::String (c.fullBand, 2) << ", "
-              << juce::String (c.lufs, 1) << " LUFS, crest " << juce::String (c.crestDb, 1) << " dB, notes "
-              << juce::String (c.noteCoverage, 2) << ", dense " << juce::String (c.dense, 2) << ", one pitch " << juce::String (c.onePitch, 2) << ", " << r.events.size() << " notes\n";
+              << juce::String (c.percussive, 2) << ", notes " << juce::String (c.noteCoverage, 2) << ", one pitch " << juce::String (c.onePitch, 2) << ", " << r.events.size() << " notes\n";
 }
 
 struct Heard { cg::State st; cg::Analysis A; audioimport::Placed placed; };
@@ -358,7 +338,10 @@ int main (int argc, char** argv)
     {
         const auto r = analyseOnThread (master (sum ({ p, b, d, s })));
         print ("Full mix", r);
-        expect (r.verdict == V::fullSong, "rejected as a full song");
+        expect (r.verdict == V::ok, "accepted");
+        const auto chords = chordsFor (r);
+        std::cout << "  " << chords << "\n";
+        expect (chords == "A minor: Am F C G Am F C G", "hears the chords Am F C G in every bar");
     }
     {
         const auto r = analyseOnThread (stereo (d, -1.0f));

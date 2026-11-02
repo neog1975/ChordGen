@@ -773,7 +773,7 @@ void ImportPanel::paint (juce::Graphics& g)
         g.setColour (theme::muted);
         g.setFont (theme::ui (13.0f));
         g.drawText (juce::String (juce::roundToInt (status.progress * 100.0f)) + "%  " + dot + "  "
-                        + (status.progress < 0.2f ? "Listening for drums, loudness and spectrum" : "Listening for the harmony with Basic Pitch"),
+                        + (status.progress < 0.2f ? "Reading the file and checking for drums" : "Listening for the harmony with Basic Pitch"),
                     r.removeFromTop (20), juce::Justification::centredLeft, true);
         return;
     }
