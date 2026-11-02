@@ -31,11 +31,15 @@ enum class Verdict { ok, fullSong, drumsOnly, noNotes, unreadable };
 struct Message { juce::String title, body, tip; };
 Message messageFor (Verdict);
 
+// How strongly each pitch class sounds per Basic Pitch frame (FFT hop 256 at 22050 Hz, ~86 per second).
+constexpr double frameSeconds = 256.0 / 22050.0;
+
 struct Result
 {
     Verdict verdict = Verdict::unreadable;
     Cues cues;
-    std::vector<NoteEvent> events;
+    std::vector<NoteEvent> events;     // for the checks only; chords come from the sound itself
+    std::vector<cg::AudioBeat> frames; // chroma and bass per frame, from Basic Pitch's note salience
     juce::String error;
 };
 
@@ -51,7 +55,10 @@ bool measureAudio (Cues&, const juce::AudioBuffer<float>& audio, double sampleRa
 void measureNotes (Cues&, const std::vector<NoteEvent>&);
 Verdict classify (const Cues&);
 
-// Notes on ChordGen's grid (1/24 beat) from the first bar that has notes, up to 16 bars.
-struct Placed { std::vector<cg::Note> notes; int bars = 4, firstBar = 0, totalBars = 0; };
-Placed place (const std::vector<NoteEvent>&, double bpm, int ts);
+// The sound per beat from the first bar that sounds, up to 16 bars; chroma and bass scaled to 0..1.
+struct Placed { std::vector<cg::AudioBeat> beats; int bars = 4, firstBar = 0, totalBars = 0; };
+Placed place (const std::vector<cg::AudioBeat>& frames, double bpm, int ts);
+
+// Chroma and bass of one frame of Basic Pitch's note posteriorgram (88 keys from A0).
+cg::AudioBeat frameChroma (const std::vector<float>& keys);
 } // namespace audioimport

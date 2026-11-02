@@ -8,7 +8,7 @@ The code and the model files come from NeuralNote **v1.1.0** (commit `113f0586`,
 
 | File | From NeuralNote | Changes for ChordGen |
 |---|---|---|
-| `BasicPitch.h/.cpp` | `Lib/Model/BasicPitch.*` | `transcribeToMIDI` takes `const float*`, reports progress, can be cancelled and returns early on very short input |
+| `BasicPitch.h/.cpp` | `Lib/Model/BasicPitch.*` | `transcribeToMIDI` takes `const float*`, reports progress, can be cancelled and returns early on very short input; `getNotesPG()` exposes the note posteriorgram |
 | `BasicPitchCNN.h/.cpp` | `Lib/Model/BasicPitchCNN.*` | model data from the `BasicPitchData` namespace instead of `BinaryData` |
 | `BasicPitchConstants.h` | `Lib/Model/BasicPitchConstants.h` | none |
 | `Notes.h/.cpp` | `Lib/Model/Notes.*` | `NoteUtils.h` (NeuralNote's UI strings, needs JUCE) left out; its `hzToMidi` copied into `Notes.cpp`; `<algorithm>` included |

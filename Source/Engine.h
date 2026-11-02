@@ -60,10 +60,15 @@ struct Chord
     int code() const { return root * 4 + (int) q; }
 };
 
+// The sound of an audio file, one entry per beat (quarter note): how strongly each pitch class sounds
+// in the whole stem, and in its lowest notes. ChordGen listens to this in place of notes (source 5).
+struct AudioBeat { std::array<float, 12> chroma {}, bass {}; };
+
 // Everything the user edits. Copied whole for undo.
 struct State
 {
     std::vector<Note> notes;
+    std::vector<AudioBeat> audio; // used while source is 5
     int bars = 4, ts = 0;
     double rhythm = 1.0; // chords per bar: 2, 1 or 0.5
     int complexity = 1;
@@ -107,6 +112,7 @@ struct Analysis
 };
 
 Analysis analyse (State& st, bool resuggest);
+bool usesAudio (const State&); // chords from an audio file's sound rather than from notes
 
 juce::String pcName (int pc, bool flats, bool pretty = true);
 juce::String keyTitle (const Key&);

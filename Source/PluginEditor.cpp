@@ -154,7 +154,7 @@ void KeyPanel::refresh()
     }
     for (int i = 0; i < 3; ++i)
     {
-        const bool has = i < (int) altKeys.size() && ! st.notes.empty();
+        const bool has = i < (int) altKeys.size() && (! st.notes.empty() || cg::usesAudio (st));
         alts[i].setVisible (has);
         if (has)
             alts[i].setButtonText (cg::keyTitle (altKeys[(size_t) i]) + " " + dot + " " + juce::String (juce::jmax (0, (int) std::lround (rs[(size_t) i] * 100))) + "%");
@@ -268,7 +268,8 @@ void PianoRoll::paint (juce::Graphics& g)
     g.reduceClipRegion (clip);
     g.fillAll (theme::rollBg);
 
-    for (int p = lo; p <= hi; ++p)
+    const bool audio = cg::usesAudio (st);
+    for (int p = lo; p <= hi && ! audio; ++p)
     {
         const float y = (float) head + (float) (hi - p) * rh;
         if (isBlack (p)) { g.setColour (juce::Colour (0xff0b0e14)); g.fillRect (0.0f, y, W, rh); }
@@ -291,6 +292,35 @@ void PianoRoll::paint (juce::Graphics& g)
         const bool bar = s % T.steps == 0, beat = st.ts == 2 ? s % (cg::stepsPerBeat * 3 / 2) == 0 : s % cg::stepsPerBeat == 0;
         g.setColour (juce::Colour (bar ? 0xff384154 : beat ? 0xff1f2531 : 0xff161b24));
         g.fillRect (std::round ((float) s * cw), (float) head, 1.0f, H - (float) head);
+    }
+
+    // an audio file: how strongly each pitch class sounds per beat; the chord's tones in the accent colour
+    if (audio)
+    {
+        const float rowH12 = (H - (float) head) / 12.0f, beatW = (float) cg::stepsPerBeat * cw;
+        const int beats = juce::jmin ((int) st.audio.size(), cols / cg::stepsPerBeat);
+        for (int k = 0; k < beats; ++k)
+        {
+            const auto& c = A.chordAt (juce::jmin (A.nSeg - 1, k * cg::stepsPerBeat / A.segSteps));
+            const int third = (c.root + (c.q == cg::Quality::min || c.q == cg::Quality::dim ? 3 : 4)) % 12;
+            const int fifth = (c.root + (c.q == cg::Quality::dim ? 6 : c.q == cg::Quality::aug ? 8 : 7)) % 12;
+            for (int pc = 0; pc < 12; ++pc)
+            {
+                const float v = juce::jlimit (0.0f, 1.0f, st.audio[(size_t) k].chroma[(size_t) pc]);
+                if (v < 0.04f) continue;
+                const bool tone = pc == c.root || pc == third || pc == fifth;
+                g.setColour ((tone ? a : theme::muted).withAlpha (0.15f + 0.85f * v));
+                g.fillRoundedRectangle ((float) k * beatW + 1.5f, (float) head + (float) (11 - pc) * rowH12 + 1.5f,
+                                        beatW - 3.0f, rowH12 - 3.0f, 2.5f);
+            }
+        }
+        g.setFont (theme::mono (9.0f));
+        for (int pc = 0; pc < 12; ++pc)
+        {
+            g.setColour (theme::soft.withAlpha (0.8f));
+            g.drawText (cg::pcName (pc, A.flats, false), juce::Rectangle<float> (4.0f, (float) head + (float) (11 - pc) * rowH12, 26.0f, rowH12),
+                        juce::Justification::centredLeft);
+        }
     }
 
     // chord names along the top
@@ -318,7 +348,7 @@ void PianoRoll::paint (juce::Graphics& g)
                                 (float) n.d * cw - 2.0f, rh - 2.0f, 2.0f);
     };
     for (const auto& n : st.notes)
-        drawNote (n, std::find (A.clash.begin(), A.clash.end(), n) != A.clash.end() ? theme::clash : a);
+        if (! audio) drawNote (n, std::find (A.clash.begin(), A.clash.end(), n) != A.clash.end() ? theme::clash : a);
     for (const auto& n : editor.proc.pending)
         drawNote (n, a.withAlpha (0.35f));
 
@@ -340,7 +370,7 @@ void PianoRoll::mouseDown (const juce::MouseEvent& e)
     const int step = (int) std::floor (e.position.x / cellW());
     if (step < 0 || step >= cols) return;
 
-    if (e.position.y < (float) head)
+    if (e.position.y < (float) head || cg::usesAudio (st))
     {
         editor.selectSegment (juce::jmin (A.nSeg - 1, step / A.segSteps));
         return;
@@ -743,7 +773,7 @@ void ImportPanel::paint (juce::Graphics& g)
         g.setColour (theme::muted);
         g.setFont (theme::ui (13.0f));
         g.drawText (juce::String (juce::roundToInt (status.progress * 100.0f)) + "%  " + dot + "  "
-                        + (status.progress < 0.2f ? "Listening for drums, loudness and spectrum" : "Transcribing notes with Basic Pitch"),
+                        + (status.progress < 0.2f ? "Listening for drums, loudness and spectrum" : "Listening for the harmony with Basic Pitch"),
                     r.removeFromTop (20), juce::Justification::centredLeft, true);
         return;
     }
@@ -868,6 +898,13 @@ ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
             const int len = s.bars * cg::timeSigs()[(size_t) s.ts].steps;
             const auto copy = s.notes;
             for (auto n : copy) { n.s += len; s.notes.push_back (n); }
+            if (cg::usesAudio (s))
+            {
+                auto loop = s.audio;
+                loop.resize ((size_t) (len / cg::stepsPerBeat));
+                s.audio = loop;
+                s.audio.insert (s.audio.end(), loop.begin(), loop.end());
+            }
             s.bars *= 2;
             s.locks.clear();
         });
@@ -875,7 +912,7 @@ ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
     styleSmall (clearButton);
     clearButton.onClick = [this]
     {
-        edit ([] (cg::State& s) { s.notes.clear(); s.locks.clear(); s.preset = {}; s.keyLocked = false; });
+        edit ([] (cg::State& s) { s.notes.clear(); s.audio.clear(); s.locks.clear(); s.preset = {}; s.keyLocked = false; });
     };
     styleSmall (importButton);
     importButton.onClick = [this] { chooseImport(); };
@@ -1534,7 +1571,9 @@ void ChordGenEditor::paint (juce::Graphics& g)
 
         g.setColour (theme::dim);
         g.setFont (theme::ui (12.0f));
-        g.drawText (ChordGenProcessor::isFx
+        g.drawText (cg::usesAudio (st)
+                        ? "ChordGen listens to the audio file: each row is a note name, brighter means louder. The chord's tones light up. Drop another stem to replace it."
+                    : ChordGenProcessor::isFx
                         ? "Sing or play one note at a time and press Play in FL (or Preview); after one pass ChordGen suggests chords. Or drop an audio stem here."
                         : "Click to add a note, drag right to lengthen, click a note to delete. Click a chord name to select it. Drop a .mid file here. Red notes clash.",
                     rp.removeFromBottom (18), juce::Justification::centredLeft, true);
@@ -1567,7 +1606,7 @@ void ChordGenEditor::paint (juce::Graphics& g)
         auto k = kbInfoArea.withTrimmedTop (8);
         g.setFont (theme::ui (13.0f));
         int x = k.getX();
-        const std::pair<juce::Colour, juce::String> legend[] = { { a, "Melody" }, { theme::chord (proc.accent), "Chord tones" }, { theme::clash, "Clash" } };
+        const std::pair<juce::Colour, juce::String> legend[] = { { a, cg::usesAudio (st) ? "In the audio" : "Melody" }, { theme::chord (proc.accent), "Chord tones" }, { theme::clash, "Clash" } };
         for (const auto& [c, t] : legend)
         {
             g.setColour (c);

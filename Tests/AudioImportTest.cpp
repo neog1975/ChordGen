@@ -1,9 +1,13 @@
-// Runs synthetic audio through ChordGen FX's audio-file import: Basic Pitch transcription and the
-// stem / full song / drums classifier. A piano stem and a bass stem must pass and give chords that
-// fit; a mastered full mix and a drum loop must be rejected.
-// Run: build/AudioImportTests_artefacts/Release/AudioImportTests [file ...]
+// Runs synthetic audio through ChordGen FX's audio-file import: Basic Pitch and the stem / full song /
+// drums classifier. A piano stem and a bass stem must pass, and ChordGen must hear the piano's chords;
+// a mastered full mix and a drum loop must be rejected.
+// Run: build/AudioImportTests_artefacts/Release/AudioImportTests
+//      ... file ...                                 reports what ChordGen hears in audio files
+//      ... --chords <bpm> stem.wav chords.mid ...   compares the chords heard with the chords in a MIDI file
 #include "../Source/AudioImport.h"
 #include "../Source/dsp/LoudnessMeter.h"
+#include <climits>
+#include <numeric>
 
 namespace
 {
@@ -168,17 +172,124 @@ void print (const char* label, const audioimport::Result& r)
               << juce::String (c.noteCoverage, 2) << ", dense " << juce::String (c.dense, 2) << ", one pitch " << juce::String (c.onePitch, 2) << ", " << r.events.size() << " notes\n";
 }
 
-juce::String chordsFor (const audioimport::Result& r)
+struct Heard { cg::State st; cg::Analysis A; audioimport::Placed placed; };
+
+// What ChordGen FX does with a file it accepts: one chord per bar from the sound.
+Heard hear (const audioimport::Result& r, double tempo)
 {
-    const auto placed = audioimport::place (r.events, bpm, 0);
-    cg::State st;
-    st.notes = placed.notes;
-    st.bars = placed.bars;
-    st.rhythm = 1.0;
-    const auto A = cg::analyse (st, true);
-    juce::String s = cg::keyTitle (A.key) + ":";
-    for (int i = 0; i < A.nSeg; ++i) s << " " << cg::chordName (A.chordAt (i), A, 0, true);
+    Heard h;
+    h.placed = audioimport::place (r.frames, tempo, 0);
+    h.st.audio = h.placed.beats;
+    h.st.bars = h.placed.bars;
+    h.st.source = 5;
+    h.st.rhythm = 1.0;
+    h.A = cg::analyse (h.st, true);
+    return h;
+}
+
+juce::String chordsFor (const audioimport::Result& r, double tempo = bpm)
+{
+    const auto h = hear (r, tempo);
+    juce::String s = cg::keyTitle (h.A.key) + ":";
+    for (int i = 0; i < h.A.nSeg; ++i) s << " " << cg::chordName (h.A.chordAt (i), h.A, 0, true);
     return s;
+}
+
+// The triad a producer wrote in each bar of a chord MIDI file: the best of the 24 major and minor
+// triads by note time, with a bonus for the lowest note as root. root -1: empty bar.
+struct Triad { int root = -1; bool minor = false; };
+std::vector<Triad> triadsInMidi (const juce::File& f)
+{
+    // read the notes directly: files exported from a song arrangement start many bars in, so they
+    // start here at their first bar with notes, as stems do
+    juce::MidiFile mf;
+    juce::FileInputStream in (f);
+    if (! in.openedOk() || ! mf.readFrom (in) || mf.getTimeFormat() <= 0) return {};
+    const double tpq = mf.getTimeFormat();
+    std::vector<cg::Note> notes;
+    for (int t = 0; t < mf.getNumTracks(); ++t)
+    {
+        juce::MidiMessageSequence seq (*mf.getTrack (t));
+        seq.updateMatchedPairs();
+        for (int i = 0; i < seq.getNumEvents(); ++i)
+        {
+            const auto& m = seq.getEventPointer (i)->message;
+            if (! m.isNoteOn() || m.getChannel() == 10) continue;
+            const double off = std::max (seq.getTimeOfMatchingKeyUp (i), m.getTimeStamp() + tpq / 4.0);
+            notes.push_back ({ m.getNoteNumber(), (int) std::lround (m.getTimeStamp() / tpq * cg::stepsPerBeat),
+                               std::max (1, (int) std::lround ((off - m.getTimeStamp()) / tpq * cg::stepsPerBeat)) });
+        }
+    }
+    if (notes.empty()) return {};
+    const int spBar = cg::timeSigs()[0].steps;
+    int first = INT_MAX, end = 0;
+    for (const auto& n : notes) { first = std::min (first, n.s); end = std::max (end, n.s + n.d); }
+    first = first / spBar * spBar;
+    for (auto& n : notes) n.s -= first;
+    const int bars = (end - first + spBar - 1) / spBar;
+    std::vector<Triad> out ((size_t) bars);
+    for (int bar = 0; bar < bars; ++bar)
+    {
+        std::array<double, 12> w {};
+        int lowest = 128;
+        for (const auto& n : notes)
+        {
+            const int ov = std::min ((bar + 1) * spBar, n.s + n.d) - std::max (bar * spBar, n.s);
+            if (ov <= 0) continue;
+            w[(size_t) (n.p % 12)] += ov;
+            lowest = std::min (lowest, n.p);
+        }
+        double best = 0.0, tot = std::accumulate (w.begin(), w.end(), 0.0);
+        for (int root = 0; root < 12; ++root)
+            for (bool minor : { false, true })
+            {
+                const int third = (root + (minor ? 3 : 4)) % 12, fifth = (root + 7) % 12;
+                double sc = 0.0;
+                for (int pc = 0; pc < 12; ++pc) sc += w[(size_t) pc] * (pc == root || pc == third || pc == fifth ? 1.0 : -0.6);
+                if (lowest < 128 && lowest % 12 == root) sc += 0.3 * tot;
+                if (sc > best) { best = sc; out[(size_t) bar] = { root, minor }; }
+            }
+    }
+    return out;
+}
+
+juce::String triadName (Triad t) { return t.root < 0 ? juce::String ("-") : cg::pcName (t.root, false, false) + (t.minor ? "m" : ""); }
+
+// --chords: per bar, does the chord heard in the stem have the root and quality written in the MIDI?
+int compareChords (int argc, char** argv)
+{
+    const double tempo = juce::String (argv[2]).getDoubleValue();
+    int right = 0, total = 0;
+    for (int i = 3; i + 1 < argc; i += 2)
+    {
+        const auto cwd = juce::File::getCurrentWorkingDirectory();
+        const auto r = audioimport::analyseFile (cwd.getChildFile (argv[i]));
+        const auto truth = triadsInMidi (cwd.getChildFile (argv[i + 1]));
+        if (r.verdict != audioimport::Verdict::ok || truth.empty())
+        {
+            std::cout << argv[i] << ": not compared (" << (truth.empty() ? "no MIDI chords" : "file rejected") << ")\n";
+            continue;
+        }
+        const auto h = hear (r, tempo);
+        juce::String heard, written;
+        int ok = 0, n = 0;
+        for (int bar = 0; bar < h.A.nSeg; ++bar)
+        {
+            const auto& c = h.A.chordAt (bar);
+            const Triad t = truth[(size_t) ((bar + h.placed.firstBar) % (int) truth.size())];
+            heard << " " << triadName ({ c.root, c.q == cg::Quality::min || c.q == cg::Quality::dim });
+            written << " " << triadName (t);
+            if (t.root < 0) continue;
+            ++n;
+            ok += c.root == t.root && (c.q == cg::Quality::min || c.q == cg::Quality::dim) == t.minor;
+        }
+        std::cout << juce::File (argv[i]).getFileName() << ": " << ok << "/" << n << " bars\n  heard  " << heard
+                  << "\n  MIDI   " << written << "\n";
+        right += ok;
+        total += n;
+    }
+    std::cout << "Chords right: " << right << "/" << total << "\n";
+    return 0;
 }
 
 // Runs the analysis on a worker thread with JUCE's default stack, as ChordGen FX does.
@@ -207,6 +318,8 @@ void expect (bool ok, const juce::String& what)
 
 int main (int argc, char** argv)
 {
+    if (argc > 3 && juce::String (argv[1]) == "--chords")
+        return compareChords (argc, argv);
 
     // real files given on the command line are only analysed and reported
     if (argc > 1)
@@ -229,13 +342,7 @@ int main (int argc, char** argv)
         expect (r.verdict == V::ok, "accepted as a stem");
         const auto chords = chordsFor (r);
         std::cout << "  " << chords << "\n";
-        expect (chords.contains ("Am") && chords.contains ("F") && chords.contains ("C") && chords.contains ("G"), "chords Am F C G found");
-
-        bool exact = true;
-        for (int pitch : { 57, 60, 64, 72 })
-            exact = exact && std::any_of (r.events.begin(), r.events.end(), [pitch] (const audioimport::NoteEvent& e)
-                                          { return e.pitch == pitch && e.start < 0.1; });
-        expect (exact, "first bar's chord and melody notes transcribed at the start");
+        expect (chords == "A minor: Am F C G Am F C G", "hears the chords Am F C G in every bar");
     }
     {
         const auto r = analyseOnThread (stereo (b, -3.0f));
@@ -253,12 +360,18 @@ int main (int argc, char** argv)
         expect (r.verdict == V::drumsOnly, "rejected as drums only");
     }
     {
-        // 120 BPM: 0.5 s = 1 beat = 24 steps; the stem starts in bar 3, which becomes bar 1
-        const auto placed = audioimport::place ({ { 60, 4.0, 4.5, 0.5 }, { 64, 4.5, 5.25, 0.5 }, { 67, 6.0, 6.5, 0.5 } }, 120.0, 0);
-        expect (placed.firstBar == 2 && placed.bars == 4 && placed.notes.size() == 3
-                    && placed.notes[0] == cg::Note { 60, 0, 24 } && placed.notes[1] == cg::Note { 64, 24, 36 }
-                    && placed.notes[2] == cg::Note { 67, 96, 24 },
-                "notes placed on the 1/24-beat grid from the first bar with notes");
+        // 120 BPM: a beat is 0.5 s, 43 frames; sound from bar 3 (4 s) to the middle of bar 4, then silence
+        std::vector<cg::AudioBeat> frames ((size_t) (10.0 / audioimport::frameSeconds));
+        for (size_t f = 0; f < frames.size(); ++f)
+        {
+            const double t = (double) f * audioimport::frameSeconds;
+            if (t >= 4.0 && t < 7.0) { frames[f].chroma[9] = 1.0f; frames[f].bass[9] = 1.0f; frames[f].chroma[0] = t < 5.0 ? 0.5f : 0.0f; }
+        }
+        const auto placed = audioimport::place (frames, 120.0, 0);
+        expect (placed.firstBar == 2 && placed.bars == 4 && placed.beats.size() == 12 && placed.beats[0].chroma[9] > 0.99f
+                    && placed.beats[1].chroma[0] > 0.4f && placed.beats[2].chroma[0] < 0.01f && placed.beats[5].chroma[9] > 0.99f
+                    && placed.beats[6].chroma[9] < 0.01f,
+                "the sound placed on beats from the first bar that sounds");
     }
 
     std::cout << (failures == 0 ? "All passed\n" : "FAILED\n");

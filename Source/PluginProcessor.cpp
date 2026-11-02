@@ -807,11 +807,12 @@ void ChordGenProcessor::finishImport()
         sendChangeMessage();
     };
     if (r.verdict != audioimport::Verdict::ok) { reject (r.verdict); return; }
-    const auto placed = audioimport::place (r.events, job->bpm, state.ts);
-    if (placed.notes.empty()) { reject (audioimport::Verdict::noNotes); return; }
+    const auto placed = audioimport::place (r.frames, job->bpm, state.ts);
+    if (placed.beats.empty()) { reject (audioimport::Verdict::noNotes); return; }
 
     pushHistory();
-    state.notes = placed.notes;
+    state.notes.clear();
+    state.audio = placed.beats;
     state.bars = placed.bars;
     state.source = 5;
     state.preset = {};
@@ -820,7 +821,7 @@ void ChordGenProcessor::finishImport()
     state.selected = 0;
     commit (true);
 
-    juce::String text = "Found " + juce::String ((int) placed.notes.size()) + " notes in " + job->file.getFileName();
+    juce::String text = "Listened to " + job->file.getFileName();
     if (placed.firstBar > 0 || placed.totalBars > placed.firstBar + placed.bars)
         text << " (bars " << placed.firstBar + 1 << "-" << placed.firstBar + placed.bars << " of " << placed.totalBars << ")";
     showToast (text);

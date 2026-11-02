@@ -40,19 +40,21 @@ FL Studio sends piano-roll notes only to instruments and audio only to effects, 
 - Built-in sound (pad, bass, melody) synced to FL, plus MIDI out for your own synths
 - **ChordGen FX**: YIN pitch tracking with live note and cents display, metronome, and a **Live mode** that plays the chord for the bar you just played
 - MIDI import and export
-- **ChordGen FX**: drop an audio stem (WAV, AIFF, MP3 or FLAC) to detect its chords, see below
+- **ChordGen FX**: drop an audio stem (WAV, AIFF, MP3 or FLAC) and it listens for the chords, see below
 
 ## Chords from an audio file (ChordGen FX)
 
-Drop an audio file onto ChordGen FX, or click **Load audio...**. ChordGen analyses it in the background, so FL keeps playing and the plugin stays responsive, and shows the progress over the melody roll:
+Drop an audio file onto ChordGen FX, or click **Load audio...**. ChordGen listens to it in the background, so FL keeps playing and the plugin stays responsive, and shows the progress over the melody roll:
 
-1. Transcribes every note, chords included, with [Basic Pitch](https://github.com/spotify/basic-pitch) (Spotify's polyphonic transcription model), embedded in C++ the way [NeuralNote](https://github.com/DamRsn/NeuralNote) does it. Nothing is sent anywhere; it all runs on your computer.
-2. Places the notes on ChordGen's grid (1/24 beat) using FL's tempo. In the Standalone app, which has no host tempo, ChordGen asks for it. It assumes the file starts on a bar line, and starts at the first bar that has notes. Up to 16 bars are used.
-3. Suggests chords for those notes, as for notes from the piano roll.
+1. Hears which notes sound, chords included, with [Basic Pitch](https://github.com/spotify/basic-pitch) (Spotify's polyphonic pitch model), embedded in C++ the way [NeuralNote](https://github.com/DamRsn/NeuralNote) does it. Nothing is sent anywhere; it all runs on your computer.
+2. Keeps the audio as sound, not MIDI: per beat, how strongly each of the 12 note names sounds, and which note is lowest. The roll shows this, each row a note name, the current chord's tones lit up. Using FL's tempo (the Standalone app asks for it), it starts at the first bar that sounds and assumes the file starts on a bar line. Up to 16 bars are used.
+3. Recognises the chord in each bar from that sound: the chord's tones should carry the sound, other tones count against it, and the lowest note names the root. Style, complexity, locks and Regenerate work as for a melody.
+
+On ten 128 BPM chord stems from a sample pack, the root and major/minor heard matched the producer's MIDI in 57 of 76 bars. Most of the rest were extended chords that read either way (Cmaj7 or Em, Am7/G or G6).
 
 Use **isolated stems**: piano, guitar, synth, pad, strings or bass. Before suggesting chords, ChordGen checks the file and says so in place of wrong chords:
 
-- **Full song.** Kick and snare hits together with harmonic content; energy in the lows (40-150 Hz), the mids and above 5 kHz most of the time; mastered loudness (about -5 to -15 LUFS) with a low crest factor; Basic Pitch hearing many notes at once from the bass to the highs. A file needs most of these to count as a full song. In FL Studio, right-click the clip in the Playlist and choose Stem separation, then drop the instrument stem.
+- **Full song.** Kick and snare hits together with harmonic content; energy in the lows (40-150 Hz), the mids and above 5 kHz most of the time; mastered loudness (about -5 to -15 LUFS) with a low crest factor; Basic Pitch hearing many notes at once from the bass to the highs. A file needs most of these, mastered loudness always, to count as a full song, so an unmastered mix of a whole song gets through. In FL Studio, right-click the clip in the Playlist and choose Stem separation, then drop the instrument stem.
 - **Drums or percussion only.** Mostly percussive sound, with hardly any notes, or with every note on one pitch (a tuned kick).
 - **No notes.** Risers, impacts and other effects with only a few stray notes.
 
@@ -78,7 +80,7 @@ Configure with `-DCHORDGEN_TESTS=ON` to build:
 
 - `ChordGenTests`: simulates FL playing a melody and checks capture timing and MIDI import
 - `PitchTests`: runs a synthetic sung melody through the pitch tracker
-- `AudioImportTests [files]`: runs a synthetic piano stem, bass stem, mastered full mix and drum loop through Basic Pitch and the stem / full song / drums check, and checks the chords found for the piano stem. Given audio files, it reports what it hears in each instead
+- `AudioImportTests [files]`: runs a synthetic piano stem, bass stem, mastered full mix and drum loop through Basic Pitch and the stem / full song / drums check, and checks the chords heard in the piano stem. Given audio files, it reports what it hears in each instead; `--chords <bpm> stem.wav chords.mid ...` compares the chords heard with the chords in MIDI files
 - `MidiBatch <folder>`: imports every MIDI file in a folder and reports any note whose timing changed
 - `ChordEval <folders> [--songs]`: compares ChordGen's chords with the chords producers wrote in chord packs or full arrangements
 

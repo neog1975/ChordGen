@@ -53,6 +53,11 @@ public:
      */
     const std::vector<Notes::Event>& getNoteEvents() const;
 
+    /**
+     * ChordGen: note posteriorgram, [frame][key] for the 88 piano keys from A0, one frame per FFT_HOP samples.
+     */
+    const std::vector<std::vector<float>>& getNotesPG() const { return mNotesPG; }
+
 private:
     // Posteriorgrams vector
     std::vector<std::vector<float>> mContoursPG;

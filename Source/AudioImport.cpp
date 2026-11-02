@@ -121,6 +121,9 @@ Result analyse (const juce::AudioBuffer<float>& audio, double sr, const Progress
 
     for (const auto& e : bp->getNoteEvents())
         r.events.push_back ({ e.pitch, e.startTime, e.endTime, e.amplitude });
+    r.frames.reserve (bp->getNotesPG().size());
+    for (const auto& keys : bp->getNotesPG())
+        r.frames.push_back (frameChroma (keys));
     measureNotes (r.cues, r.events);
     r.verdict = classify (r.cues);
     keepGoing (progress, 1.0f);
@@ -319,7 +322,8 @@ Verdict classify (const Cues& c)
     const bool mastered = c.lufs >= -15.0 && c.lufs <= -5.0 && c.crestDb <= 13.0;
     const bool dense = c.dense >= 0.3;
     const int score = (int) drumsAndHarmony + (int) fullBand + (int) mastered + (int) dense;
-    if (score >= 3 && (drumsAndHarmony || fullBand))
+    // a finished song is mastered; a loud, bright, pumping synth stem can have the other three
+    if (score >= 3 && mastered && (drumsAndHarmony || fullBand))
         return Verdict::fullSong;
 
     // a few stray notes (risers, impacts, effects) give no chords worth showing
@@ -329,40 +333,80 @@ Verdict classify (const Cues& c)
 }
 
 //==============================================================================
-Placed place (const std::vector<NoteEvent>& events, double bpm, int ts)
+cg::AudioBeat frameChroma (const std::vector<float>& keys)
+{
+    cg::AudioBeat f;
+    bool bassFound = false;
+    for (size_t k = 0; k < keys.size(); ++k)
+    {
+        const float v = keys[k];
+        if (v < 0.3f) continue; // the model's noise floor
+        const size_t pc = (k + (size_t) MIDI_OFFSET) % 12;
+        f.chroma[pc] += v;
+        if (! bassFound && v >= 0.3f) // the lowest clear note
+        {
+            f.bass[pc] = v;
+            bassFound = true;
+        }
+    }
+    return f;
+}
+
+Placed place (const std::vector<cg::AudioBeat>& frames, double bpm, int ts)
 {
     Placed out;
-    if (events.empty() || bpm <= 0.0) return out;
-    const int spBar = cg::timeSigs()[(size_t) ts].steps;
-    const double stepsPerSecond = bpm / 60.0 * cg::stepsPerBeat;
+    if (frames.empty() || bpm <= 0.0) return out;
+    const auto& T = cg::timeSigs()[(size_t) ts];
+    const int beatsPerBar = T.steps / cg::stepsPerBeat; // quarter notes
+    const double beatSeconds = 60.0 / bpm;
 
-    std::vector<cg::Note> all;
-    for (const auto& e : events)
+    // average the frames of each beat
+    const int totalBeats = (int) std::ceil ((double) frames.size() * frameSeconds / beatSeconds);
+    std::vector<cg::AudioBeat> beats ((size_t) totalBeats);
+    std::vector<int> count ((size_t) totalBeats, 0);
+    for (size_t f = 0; f < frames.size(); ++f)
     {
-        const cg::Note n { e.pitch, (int) std::lround (e.start * stepsPerSecond),
-                           juce::jmax (1, (int) std::lround ((e.end - e.start) * stepsPerSecond)) };
-        if (std::none_of (all.begin(), all.end(), [&] (const cg::Note& o) { return o.p == n.p && o.s == n.s; }))
-            all.push_back (n);
+        const int b = juce::jmin (totalBeats - 1, (int) ((double) f * frameSeconds / beatSeconds));
+        for (size_t pc = 0; pc < 12; ++pc)
+        {
+            beats[(size_t) b].chroma[pc] += frames[f].chroma[pc];
+            beats[(size_t) b].bass[pc] += frames[f].bass[pc];
+        }
+        ++count[(size_t) b];
     }
-    std::sort (all.begin(), all.end(), [] (const cg::Note& a, const cg::Note& b) { return a.s != b.s ? a.s < b.s : a.p < b.p; });
+    float peak = 0.0f, bassPeak = 0.0f;
+    std::vector<float> energy ((size_t) totalBeats);
+    for (int b = 0; b < totalBeats; ++b)
+    {
+        auto& beat = beats[(size_t) b];
+        for (size_t pc = 0; pc < 12; ++pc)
+        {
+            beat.chroma[pc] /= (float) juce::jmax (1, count[(size_t) b]);
+            beat.bass[pc] /= (float) juce::jmax (1, count[(size_t) b]);
+            peak = std::max (peak, beat.chroma[pc]);
+            bassPeak = std::max (bassPeak, beat.bass[pc]);
+            energy[(size_t) b] += beat.chroma[pc];
+        }
+    }
+    if (peak <= 0.0f) return out;
+    for (auto& beat : beats)
+        for (size_t pc = 0; pc < 12; ++pc)
+        {
+            beat.chroma[pc] /= peak;
+            beat.bass[pc] = bassPeak > 0.0f ? beat.bass[pc] / bassPeak : 0.0f;
+        }
 
-    int lastEnd = 0;
-    for (const auto& n : all) lastEnd = std::max (lastEnd, n.s + n.d);
-    out.totalBars = (lastEnd + spBar - 1) / spBar;
-    out.firstBar = all.front().s / spBar;
-
-    // stems often start with silence: begin at the first bar with notes, keeping the bar lines
-    const int offset = out.firstBar * spBar;
-    const int needed = (lastEnd - offset + spBar - 1) / spBar;
+    // stems often start with silence: begin at the first bar that sounds, keeping the bar lines
+    const float loudest = *std::max_element (energy.begin(), energy.end());
+    int first = 0, last = totalBeats - 1;
+    while (first < totalBeats && energy[(size_t) first] < 0.1f * loudest) ++first;
+    while (last > first && energy[(size_t) last] < 0.1f * loudest) --last;
+    out.totalBars = (last + beatsPerBar) / beatsPerBar;
+    out.firstBar = first / beatsPerBar;
+    const int needed = out.totalBars - out.firstBar;
     out.bars = needed <= 4 ? 4 : needed <= 8 ? 8 : 16;
-    const int end = out.bars * spBar;
-    for (auto n : all)
-    {
-        n.s -= offset;
-        if (n.s >= end) continue;
-        n.d = std::min (n.d, end - n.s);
-        out.notes.push_back (n);
-    }
+    const int from = out.firstBar * beatsPerBar, to = juce::jmin (totalBeats, from + out.bars * beatsPerBar);
+    out.beats.assign (beats.begin() + from, beats.begin() + to);
     return out;
 }
 } // namespace audioimport
