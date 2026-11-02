@@ -1,6 +1,6 @@
 # ChordGen
 
-**Free, open-source chord suggestions for your melody.** ChordGen listens to a melody from the FL Studio piano roll, an audio track or a microphone, detects the key and suggests chord progressions that fit. Drag the result straight into the piano roll as MIDI.
+**Free, open-source chord suggestions for your melody.** ChordGen listens to a melody from the FL Studio piano roll, an audio track, a microphone or an audio file, detects the key and suggests chord progressions that fit. Drag the result straight into the piano roll as MIDI.
 
 <p align="center">
   <img src="docs/ui.png" alt="ChordGen" width="80%">
@@ -19,7 +19,7 @@ FL Studio sends piano-roll notes only to instruments and audio only to effects, 
 | Plugin | Where in FL | Listens to |
 |---|---|---|
 | **ChordGen** | Channel Rack (instrument) | the notes in its piano roll |
-| **ChordGen FX** | Mixer insert (effect) | an audio track or a microphone, one note at a time |
+| **ChordGen FX** | Mixer insert (effect) | an audio track or a microphone, one note at a time, or an audio file you drop on it (polyphonic) |
 
 ## How it works
 
@@ -40,6 +40,23 @@ FL Studio sends piano-roll notes only to instruments and audio only to effects, 
 - Built-in sound (pad, bass, melody) synced to FL, plus MIDI out for your own synths
 - **ChordGen FX**: YIN pitch tracking with live note and cents display, metronome, and a **Live mode** that plays the chord for the bar you just played
 - MIDI import and export
+- **ChordGen FX**: drop an audio stem (WAV, AIFF, MP3 or FLAC) to detect its chords, see below
+
+## Chords from an audio file (ChordGen FX)
+
+Drop an audio file onto ChordGen FX, or click **Load audio...**. ChordGen analyses it in the background, so FL keeps playing and the plugin stays responsive, and shows the progress over the melody roll:
+
+1. Transcribes every note, chords included, with [Basic Pitch](https://github.com/spotify/basic-pitch) (Spotify's polyphonic transcription model), embedded in C++ the way [NeuralNote](https://github.com/DamRsn/NeuralNote) does it. Nothing is sent anywhere; it all runs on your computer.
+2. Places the notes on ChordGen's grid (1/24 beat) using FL's tempo. In the Standalone app, which has no host tempo, ChordGen asks for it. It assumes the file starts on a bar line, and starts at the first bar that has notes. Up to 16 bars are used.
+3. Suggests chords for those notes, as for notes from the piano roll.
+
+Use **isolated stems**: piano, guitar, synth, pad, strings or bass. Before suggesting chords, ChordGen checks the file and says so in place of wrong chords:
+
+- **Full song.** Kick and snare hits together with harmonic content; energy in the lows (40-150 Hz), the mids and above 5 kHz most of the time; mastered loudness (about -5 to -15 LUFS) with a low crest factor; Basic Pitch hearing many notes at once from the bass to the highs. A file needs most of these to count as a full song. In FL Studio, right-click the clip in the Playlist and choose Stem separation, then drop the instrument stem.
+- **Drums or percussion only.** Mostly percussive sound, with hardly any notes, or with every note on one pitch (a tuned kick).
+- **No notes.** Risers, impacts and other effects with only a few stray notes.
+
+Only the first 3 minutes of a file are analysed. A 3-minute stem takes about 10 seconds on a 2017 Intel iMac (Core i5).
 
 ## Building
 
@@ -61,9 +78,18 @@ Configure with `-DCHORDGEN_TESTS=ON` to build:
 
 - `ChordGenTests`: simulates FL playing a melody and checks capture timing and MIDI import
 - `PitchTests`: runs a synthetic sung melody through the pitch tracker
+- `AudioImportTests [files]`: runs a synthetic piano stem, bass stem, mastered full mix and drum loop through Basic Pitch and the stem / full song / drums check, and checks the chords found for the piano stem. Given audio files, it reports what it hears in each instead
 - `MidiBatch <folder>`: imports every MIDI file in a folder and reports any note whose timing changed
 - `ChordEval <folders> [--songs]`: compares ChordGen's chords with the chords producers wrote in chord packs or full arrangements
 
 ## License
 
 ChordGen is released under the [GNU Affero General Public License v3.0](LICENSE). It is built with [JUCE](https://juce.com), which is available under the AGPLv3 or a commercial license.
+
+ChordGen FX includes third-party code and a machine-learning model, each under its own license, all compatible with the AGPLv3:
+
+- **Basic Pitch** model and weights by Spotify: [Apache License 2.0](ThirdParty/BasicPitch/LICENSE) ([notice](ThirdParty/BasicPitch/NOTICE-basic-pitch))
+- **NeuralNote**'s C++ port of Basic Pitch by Damien Ronssin and Tibor Vass: [Apache License 2.0](ThirdParty/BasicPitch/LICENSE). The changed and new files are listed in [ThirdParty/BasicPitch](ThirdParty/BasicPitch/README.md)
+- **RTNeural** by Jatin Chowdhury: BSD 3-Clause, downloaded at build time (with Eigen, MPL 2.0, and nlohmann/json, MIT)
+
+The Forge Master loudness and spectrum analysers in `Source/dsp` are by ChordGen's author and are AGPLv3 like the rest.

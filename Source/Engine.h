@@ -75,7 +75,7 @@ struct State
     std::map<int, int> locks; // segment -> chord code
     std::vector<int> prog;    // chord codes
     int sugIdx = 0, seed = 0, selected = 0;
-    int source = 0;           // 0 FL piano roll, 1 drawn, 2 MIDI file, 3 audio track, 4 microphone
+    int source = 0;           // 0 FL piano roll, 1 drawn, 2 MIDI file, 3 audio track, 4 microphone, 5 audio file
     juce::String preset;
 };
 

@@ -20,6 +20,15 @@ void styleSmall (juce::TextButton& b, float fontSize = 12.5f)
     b.getProperties().set ("fontSize", fontSize);
     b.getProperties().set ("radius", 7.0f);
 }
+
+bool isMidiFile (const juce::String& path) { return path.endsWithIgnoreCase (".mid") || path.endsWithIgnoreCase (".midi"); }
+
+bool isAudioFile (const juce::String& path)
+{
+    for (auto ext : { ".wav", ".wave", ".aif", ".aiff", ".mp3", ".flac" })
+        if (path.endsWithIgnoreCase (ext)) return true;
+    return false;
+}
 } // namespace
 
 //==============================================================================
@@ -376,16 +385,6 @@ void PianoRoll::mouseUp (const juce::MouseEvent&)
     editor.proc.commit (true);
 }
 
-bool PianoRoll::isInterestedInFileDrag (const juce::StringArray& files)
-{
-    return files.size() == 1 && (files[0].endsWithIgnoreCase (".mid") || files[0].endsWithIgnoreCase (".midi"));
-}
-
-void PianoRoll::filesDropped (const juce::StringArray& files, int, int)
-{
-    editor.importFile (juce::File (files[0]));
-}
-
 //==============================================================================
 void LockButton::paintButton (juce::Graphics& g, bool over, bool)
 {
@@ -637,8 +636,136 @@ void Toast::paint (juce::Graphics& g)
 }
 
 //==============================================================================
+ImportPanel::ImportPanel (ChordGenProcessor& p) : proc (p)
+{
+    for (auto* b : { &button, &cancelButton })
+    {
+        styleSmall (*b, 13.0f);
+        addChildComponent (b);
+    }
+    button.onClick = [this]
+    {
+        if (askFile != juce::File()) start();
+        else if (proc.importStatus().running) proc.cancelImport();
+        else proc.notice = {};
+        update();
+    };
+    cancelButton.onClick = [this] { askFile = juce::File(); update(); };
+
+    bpmEditor.setInputRestrictions (6, "0123456789.");
+    bpmEditor.setJustification (juce::Justification::centred);
+    bpmEditor.setFont (theme::mono (15.0f));
+    bpmEditor.setColour (juce::TextEditor::backgroundColourId, theme::panel2);
+    bpmEditor.setColour (juce::TextEditor::outlineColourId, theme::line2);
+    bpmEditor.setColour (juce::TextEditor::textColourId, theme::fg);
+    bpmEditor.onReturnKey = [this] { start(); };
+    addChildComponent (bpmEditor);
+}
+
+void ImportPanel::askTempo (const juce::File& file, double bpm)
+{
+    askFile = file;
+    bpmEditor.setText (juce::String (juce::roundToInt (bpm)), false);
+    update();
+    bpmEditor.grabKeyboardFocus();
+    bpmEditor.selectAll();
+}
+
+void ImportPanel::start()
+{
+    const double bpm = bpmEditor.getText().getDoubleValue();
+    if (bpm < 40.0 || bpm > 300.0) { bpmEditor.grabKeyboardFocus(); bpmEditor.selectAll(); return; }
+    const auto file = askFile;
+    askFile = juce::File();
+    proc.importAudio (file, bpm);
+    update();
+}
+
+void ImportPanel::update()
+{
+    status = proc.importStatus();
+    const bool asking = askFile != juce::File();
+    const bool show = asking || status.running || proc.notice.title.isNotEmpty();
+    button.setButtonText (asking ? "Analyse" : status.running ? "Cancel" : "OK");
+    button.setVisible (show);
+    cancelButton.setVisible (asking);
+    bpmEditor.setVisible (asking);
+    setVisible (show);
+    if (show) toFront (false);
+    repaint();
+}
+
+void ImportPanel::resized()
+{
+    auto r = getLocalBounds().reduced (24, 18).removeFromBottom (30);
+    button.setBounds (r.removeFromRight (96));
+    r.removeFromRight (8);
+    cancelButton.setBounds (r.removeFromRight (80));
+    bpmEditor.setBounds (getLocalBounds().reduced (24, 18).withTrimmedTop (64).removeFromTop (34).removeFromLeft (110));
+}
+
+void ImportPanel::paint (juce::Graphics& g)
+{
+    const auto a = theme::accent (proc.accent);
+    g.setColour (theme::rollBg.withAlpha (0.97f));
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 10.0f);
+    g.setColour (theme::line2);
+    g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 10.0f, 1.0f);
+
+    auto r = getLocalBounds().reduced (24, 18);
+    if (askFile != juce::File())
+    {
+        theme::label (g, "Tempo", r.removeFromTop (18));
+        g.setColour (theme::fg);
+        g.setFont (theme::ui (16.0f, true));
+        g.drawText ("At what tempo is " + askFile.getFileName() + "?", r.removeFromTop (26), juce::Justification::centredLeft, true);
+        g.setColour (theme::muted);
+        g.setFont (theme::ui (13.0f));
+        g.drawText ("BPM", r.withTrimmedTop (20).removeFromTop (34).withTrimmedLeft (120), juce::Justification::centredLeft);
+        g.drawText ("ChordGen places the notes on bars with it. It assumes the file starts on a bar line.",
+                    r.withTrimmedTop (62).removeFromTop (20), juce::Justification::centredLeft, true);
+        return;
+    }
+
+    if (status.running)
+    {
+        theme::label (g, "Analysing audio", r.removeFromTop (18));
+        g.setColour (theme::fg);
+        g.setFont (theme::ui (16.0f, true));
+        g.drawText (status.file, r.removeFromTop (28), juce::Justification::centredLeft, true);
+        r.removeFromTop (12);
+        const auto bar = r.removeFromTop (8).toFloat();
+        g.setColour (theme::line);
+        g.fillRoundedRectangle (bar, 4.0f);
+        g.setColour (a);
+        g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, status.progress)), 4.0f);
+        r.removeFromTop (10);
+        g.setColour (theme::muted);
+        g.setFont (theme::ui (13.0f));
+        g.drawText (juce::String (juce::roundToInt (status.progress * 100.0f)) + "%  " + dot + "  "
+                        + (status.progress < 0.2f ? "Listening for drums, loudness and spectrum" : "Transcribing notes with Basic Pitch"),
+                    r.removeFromTop (20), juce::Justification::centredLeft, true);
+        return;
+    }
+
+    const auto& n = proc.notice;
+    g.setColour (theme::clash);
+    g.setFont (theme::ui (18.0f, true));
+    g.drawText (n.title, r.removeFromTop (30), juce::Justification::centredLeft, true);
+    g.setColour (theme::soft);
+    g.setFont (theme::ui (14.5f));
+    g.drawFittedText (n.body, r.removeFromTop (44), juce::Justification::topLeft, 2);
+    if (n.tip.isNotEmpty())
+    {
+        g.setColour (a);
+        g.setFont (theme::ui (13.5f));
+        g.drawFittedText (n.tip, r.removeFromTop (40).withTrimmedRight (110), juce::Justification::topLeft, 2);
+    }
+}
+
+//==============================================================================
 ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
-    : AudioProcessorEditor (p), proc (p), keyPanel (p), roll (*this), keyboard (*this)
+    : AudioProcessorEditor (p), proc (p), keyPanel (p), roll (*this), keyboard (*this), importPanel (p)
 {
     lnf.setAccent (proc.accent);
     setLookAndFeel (&lnf);
@@ -752,6 +879,11 @@ ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
     };
     styleSmall (importButton);
     importButton.onClick = [this] { chooseImport(); };
+    if (ChordGenProcessor::isFx)
+    {
+        importButton.setButtonText ("Load audio...");
+        importButton.setTooltip ("Detect chords from an audio stem (WAV, AIFF, MP3, FLAC) or a .mid file. You can also drop the file here.");
+    }
     for (auto* c : { (juce::Component*) &presetBox, (juce::Component*) &barsBox, (juce::Component*) &tsBox,
                      (juce::Component*) &dupButton, (juce::Component*) &clearButton, (juce::Component*) &importButton,
                      (juce::Component*) &roll })
@@ -876,6 +1008,7 @@ ChordGenEditor::ChordGenEditor (ChordGenProcessor& p)
     previewButton.onClick = [this] { proc.setOption ("preview", ! proc.optPreview); };
     saveMidiButton.onClick = [this] { saveMidi(); };
     addAndMakeVisible (dragButton);
+    addChildComponent (importPanel);
     addChildComponent (toast);
 
     setWantsKeyboardFocus (true);
@@ -978,6 +1111,7 @@ void ChordGenEditor::refresh()
     keyboard.segment = playSeg >= 0 ? playSeg : st.selected;
     roll.repaint();
     keyboard.repaint();
+    importPanel.update();
     repaint();
 
     if (proc.toastId != lastToastId)
@@ -1037,6 +1171,7 @@ void ChordGenEditor::updatePlaying()
 void ChordGenEditor::timerCallback()
 {
     updatePlaying();
+    if (proc.importStatus().running) importPanel.update();
 
     if (ChordGenProcessor::isFx)
     {
@@ -1082,6 +1217,12 @@ void ChordGenEditor::writeDragFile()
 
 void ChordGenEditor::importFile (const juce::File& f)
 {
+    if (isAudioFile (f.getFullPathName()))
+    {
+        if (ChordGenProcessor::isFx) importAudio (f);
+        else toast.show ("Audio files: load ChordGen FX on a mixer insert and drop the file there.");
+        return;
+    }
     const auto r = cg::importMidi (f);
     if (r.error.isNotEmpty()) { toast.show ("Could not read that file: " + r.error); return; }
     edit ([r] (cg::State& s)
@@ -1092,9 +1233,44 @@ void ChordGenEditor::importFile (const juce::File& f)
     proc.showToast ("Imported " + juce::String ((int) r.notes.size()) + " notes from " + f.getFileName());
 }
 
+void ChordGenEditor::importAudio (const juce::File& f)
+{
+    const auto info = proc.getHostInfo();
+    if (info.bpmKnown) proc.importAudio (f, info.bpm);
+    else importPanel.askTempo (f, info.bpm); // no tempo from a host (Standalone)
+}
+
+bool ChordGenEditor::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    return files.size() == 1 && (isMidiFile (files[0]) || (ChordGenProcessor::isFx && isAudioFile (files[0])));
+}
+
+void ChordGenEditor::filesDropped (const juce::StringArray& files, int, int)
+{
+    dragHover = false;
+    repaint();
+    importFile (juce::File (files[0]));
+}
+
+void ChordGenEditor::paintOverChildren (juce::Graphics& g)
+{
+    if (! dragHover) return;
+    const auto a = theme::accent (proc.accent);
+    const auto r = rollPanelArea.toFloat().reduced (2.0f);
+    g.setColour (theme::bg.withAlpha (0.85f));
+    g.fillRoundedRectangle (r, 16.0f);
+    g.setColour (a);
+    g.drawRoundedRectangle (r, 16.0f, 2.0f);
+    g.setFont (theme::ui (18.0f, true));
+    g.drawText (ChordGenProcessor::isFx ? "Drop an audio stem or a .mid file to detect chords" : "Drop a .mid file", r.toNearestInt(),
+                juce::Justification::centred);
+}
+
 void ChordGenEditor::chooseImport()
 {
-    chooser = std::make_unique<juce::FileChooser> ("Import a melody", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.mid;*.midi");
+    const auto patterns = ChordGenProcessor::isFx ? "*.wav;*.wave;*.aif;*.aiff;*.mp3;*.flac;*.mid;*.midi" : "*.mid;*.midi";
+    chooser = std::make_unique<juce::FileChooser> (ChordGenProcessor::isFx ? "Load an audio stem or a MIDI file" : "Import a melody",
+                                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory), patterns);
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                           [this] (const juce::FileChooser& fc)
                           {
@@ -1174,6 +1350,7 @@ void ChordGenEditor::resized()
         rp.removeFromTop (10);
         rp.removeFromBottom (22); // hint
         roll.setBounds (rp);
+        importPanel.setBounds (rp);
     }
 
     r.removeFromTop (16);
@@ -1320,7 +1497,7 @@ void ChordGenEditor::paint (juce::Graphics& g)
         g.setColour (theme::line);
         g.drawRoundedRectangle (box.reduced (0.5f), 16.0f, 1.0f);
         auto rp = rollPanelArea.reduced (18, 14);
-        const juce::StringArray sources { "FL piano roll", "Drawn", "MIDI file", "Audio track", "Microphone" };
+        const juce::StringArray sources { "FL piano roll", "Drawn", "MIDI file", "Audio track", "Microphone", "Audio file" };
         const auto title = "Melody " + dot + " " + sources[st.source];
         auto titleRow = rp.removeFromTop (28);
         theme::label (g, title, titleRow);
@@ -1358,7 +1535,7 @@ void ChordGenEditor::paint (juce::Graphics& g)
         g.setColour (theme::dim);
         g.setFont (theme::ui (12.0f));
         g.drawText (ChordGenProcessor::isFx
-                        ? "Sing or play one note at a time. Press Play in FL (or Preview with the metronome); after one pass ChordGen suggests chords."
+                        ? "Sing or play one note at a time and press Play in FL (or Preview); after one pass ChordGen suggests chords. Or drop an audio stem here."
                         : "Click to add a note, drag right to lengthen, click a note to delete. Click a chord name to select it. Drop a .mid file here. Red notes clash.",
                     rp.removeFromBottom (18), juce::Justification::centredLeft, true);
     }

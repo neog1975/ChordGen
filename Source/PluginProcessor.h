@@ -33,6 +33,8 @@ struct CapturedNote
     int pass = 0;                  // increments on every new loop pass / transport start
 };
 
+class AudioImportJob;
+
 class ChordGenProcessor : public juce::AudioProcessor,
                           public juce::ChangeBroadcaster,
                           private juce::Timer
@@ -102,9 +104,17 @@ public:
     struct HostInfo
     {
         double bpm = 120.0, loopPos = 0.0;
-        bool hostPlaying = false, active = false;
+        bool hostPlaying = false, active = false, bpmKnown = false;
     };
     HostInfo getHostInfo() const;
+
+    // ChordGen FX: chords for an audio file (a stem), analysed on a background thread.
+    void importAudio (const juce::File&, double bpm);
+    void cancelImport();
+    struct ImportStatus { bool running = false; float progress = 0.0f; juce::String file; };
+    ImportStatus importStatus() const;
+    struct Notice { juce::String title, body, tip; };
+    Notice notice; // why the last file gave no chords; cleared when the user dismisses it
 
 private:
     friend class PitchThread;
@@ -118,8 +128,10 @@ private:
     std::vector<CapturedNote> popCapturedNotes();
     std::shared_ptr<const Pattern> currentPattern() const;
     void allNotesOff (juce::MidiBuffer& out, int sample);
+    void finishImport();
 
     std::vector<cg::State> undoStack, redoStack;
+    std::unique_ptr<AudioImportJob> importJob;
 
     // audio / mic input
     PitchTracker tracker;
@@ -167,7 +179,7 @@ private:
                       midiThru { true }, captureOn { true };
 
     std::atomic<double> infoBpm { 120.0 }, infoLoopPos { 0.0 };
-    std::atomic<bool> infoHostPlaying { false }, infoActive { false };
+    std::atomic<bool> infoHostPlaying { false }, infoActive { false }, infoBpmKnown { false };
 
     double sampleRate = 44100.0;
     double previewBeat = 0.0, lastPpq = 0.0, lastPpqPlayed = 0.0, lastBlockEnd = 0.0, clockOffset = 0.0;
