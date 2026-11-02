@@ -50,7 +50,7 @@ Drop an audio file onto ChordGen FX, or click **Load audio...**. ChordGen listen
 2. Keeps the audio as sound, not MIDI: per beat, how strongly each of the 12 note names sounds, and which note is lowest. The roll shows this, each row a note name, the current chord's tones lit up. Using FL's tempo (the Standalone app asks for it), it starts at the first bar that sounds and assumes the file starts on a bar line. Up to 16 bars are used.
 3. Recognises the chord in each bar from that sound: the chord's tones should carry the sound, other tones count against it, and the lowest note names the root. Style, complexity, locks and Regenerate work as for a melody.
 
-On ten 128 BPM chord stems from a sample pack, the root and major/minor heard matched the producer's MIDI in 57 of 76 bars. Most of the rest were extended chords that read either way (Cmaj7 or Em, Am7/G or G6).
+On ten 128 BPM chord stems from a sample pack, the root and major/minor heard matched the producer's MIDI in 56 of 76 bars; most of the rest were extended chords that read either way (Cmaj7 or Em, Am7/G or G6). On the keyboard and synth stems of a song, 31 of 32 bars. Stems that play chords work best: a guitar riff or a bass line on its own does not show the chord, and gives wrong chords.
 
 Use **isolated stems**: piano, guitar, synth, pad, strings or bass. Before suggesting chords, ChordGen checks the file and says so in place of wrong chords:
 

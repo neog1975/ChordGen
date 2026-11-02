@@ -198,7 +198,7 @@ juce::String chordsFor (const audioimport::Result& r, double tempo = bpm)
 // The triad a producer wrote in each bar of a chord MIDI file: the best of the 24 major and minor
 // triads by note time, with a bonus for the lowest note as root. root -1: empty bar.
 struct Triad { int root = -1; bool minor = false; };
-std::vector<Triad> triadsInMidi (const juce::File& f)
+std::vector<Triad> triadsInMidi (const juce::File& f, int& firstBar)
 {
     // read the notes directly: files exported from a song arrangement start many bars in, so they
     // start here at their first bar with notes, as stems do
@@ -225,6 +225,7 @@ std::vector<Triad> triadsInMidi (const juce::File& f)
     int first = INT_MAX, end = 0;
     for (const auto& n : notes) { first = std::min (first, n.s); end = std::max (end, n.s + n.d); }
     first = first / spBar * spBar;
+    firstBar = first / spBar;
     for (auto& n : notes) n.s -= first;
     const int bars = (end - first + spBar - 1) / spBar;
     std::vector<Triad> out ((size_t) bars);
@@ -264,7 +265,8 @@ int compareChords (int argc, char** argv)
     {
         const auto cwd = juce::File::getCurrentWorkingDirectory();
         const auto r = audioimport::analyseFile (cwd.getChildFile (argv[i]));
-        const auto truth = triadsInMidi (cwd.getChildFile (argv[i + 1]));
+        int midiFirstBar = 0;
+        const auto truth = triadsInMidi (cwd.getChildFile (argv[i + 1]), midiFirstBar);
         if (r.verdict != audioimport::Verdict::ok || truth.empty())
         {
             std::cout << argv[i] << ": not compared (" << (truth.empty() ? "no MIDI chords" : "file rejected") << ")\n";
@@ -276,7 +278,9 @@ int compareChords (int argc, char** argv)
         for (int bar = 0; bar < h.A.nSeg; ++bar)
         {
             const auto& c = h.A.chordAt (bar);
-            const Triad t = truth[(size_t) ((bar + h.placed.firstBar) % (int) truth.size())];
+            // both start at their first bar with sound; compare the same bar of the song (a loop repeats)
+            const int songBar = bar + h.placed.firstBar - midiFirstBar, n0 = (int) truth.size();
+            const Triad t = truth[(size_t) (((songBar % n0) + n0) % n0)];
             heard << " " << triadName ({ c.root, c.q == cg::Quality::min || c.q == cg::Quality::dim });
             written << " " << triadName (t);
             if (t.root < 0) continue;
@@ -321,14 +325,16 @@ int main (int argc, char** argv)
     if (argc > 3 && juce::String (argv[1]) == "--chords")
         return compareChords (argc, argv);
 
-    // real files given on the command line are only analysed and reported
+    // real files given on the command line are only analysed and reported ([--bpm N] file ...)
     if (argc > 1)
     {
+        double tempo = bpm;
         for (int i = 1; i < argc; ++i)
         {
+            if (juce::String (argv[i]) == "--bpm" && i + 1 < argc) { tempo = juce::String (argv[++i]).getDoubleValue(); continue; }
             const auto r = audioimport::analyseFile (juce::File::getCurrentWorkingDirectory().getChildFile (argv[i]));
             print (argv[i], r);
-            if (r.verdict == audioimport::Verdict::ok) std::cout << "  " << chordsFor (r) << "\n";
+            if (r.verdict == audioimport::Verdict::ok) std::cout << "  " << chordsFor (r, tempo) << "\n";
         }
         return 0;
     }
